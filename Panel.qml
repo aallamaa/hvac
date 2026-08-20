@@ -12,8 +12,11 @@ Panel {
 
   readonly property string cliPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/mvac.ac/ac_cli.py"
 
-  readonly property var modes: ["COOL", "HEAT", "DRY", "FAN", "AUTO"]
-  readonly property var fanSpeeds: ["AUTO", "LOW", "MID1", "MID2", "HIGH"]
+  // HEAT and AUTO are rejected outright by this hardware (cooling-only
+  // unit, confirmed both on and off), and fan speed LOW is likewise
+  // rejected - only these values actually stick.
+  readonly property var modes: ["COOL", "DRY", "FAN"]
+  readonly property var fanSpeeds: ["AUTO", "MID1", "MID2", "HIGH"]
 
   property var zones: []
   property string lastError: ""

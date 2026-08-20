@@ -77,14 +77,21 @@ on failure it prints `{"error": "..."}` to stderr and exits 1.
 | `on` | `<group>` | Turn a zone on. |
 | `off` | `<group>` | Turn a zone off. |
 | `set-temp` | `<group> <temp>` | Set target temperature (16–30). |
-| `set-fan` | `<group> <speed>` | Set fan speed: `AUTO`, `LOW`, `MID1`, `MID2`, `HIGH`. |
-| `set-mode` | `<group> <mode>` | Set mode: `COOL`, `HEAT`, `DRY`, `FAN`, `AUTO` (also accepts `AUTOCOOL`). |
+| `set-fan` | `<group> <speed>` | Set fan speed: `AUTO`, `MID1`, `MID2`, `HIGH`. |
+| `set-mode` | `<group> <mode>` | Set mode: `COOL`, `DRY`, `FAN`. |
 | `all-on` | | Turn on every configured zone. |
 | `all-off` | | Turn off every configured zone. |
 | `discover` | `[--max N]` | Probe groups `1..N` (default 16) one at a time and report which respond. Doesn't touch the config. |
 | `zones-init` | `[--max N]` | Run `discover`, then add any newly-found groups to the config as "Zone N" — existing names are kept. |
 | `rename` | `<group> <name>` | Set a zone's display name in the config. |
 | `set-host` | `<host> [port]` | Set the gateway host/port in the config (default port 80). |
+
+`mit.py`'s `Mode`/`FanSpeed` enums also define `HEAT`, `AUTO` (mode), and
+`LOW` (fan speed), but this hardware silently rejects all three — the
+gateway acks the write and the setting never actually changes, confirmed
+both with the zone on and off. This is a cooling-only unit with no heat
+pump; the plugin's mode/fan cycle buttons only cycle through the values
+that actually stick.
 
 ### Examples
 
