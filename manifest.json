@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "mvac.ac",
+  "name": "AC Control",
+  "version": "1.0.0",
+  "author": "kader",
+  "description": "Mitsubishi M-NET HVAC control: per-zone status, on/off, mode, temperature, fan speed",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "AC",
+    "description": "AC/HVAC zone control",
+    "category": "Climate",
+    "allowMultiple": false
+  }
+}
