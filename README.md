@@ -36,12 +36,19 @@ Gateway host/port and zone (group number → name) live in
 {
   "host": "192.168.1.2",
   "port": 80,
+  "icon_temp": "avg",
   "zones": {
     "1": "Living room",
     "2": "Kitchen"
   }
 }
 ```
+
+`icon_temp` controls what number the bar icon shows next to the snowflake
+for the zones that are currently on (icon-only when everything's off):
+`avg` (default), `min`, `max`, or `off`. It's also editable straight from
+the popup — the "Icon: AVG" button in the header cycles through the four
+values.
 
 If this file is missing, `ac_cli.py` falls back to built-in defaults
 (`192.168.1.2`, zones 1–6 named "Zone N") so the plugin still works out of
@@ -85,6 +92,7 @@ on failure it prints `{"error": "..."}` to stderr and exits 1.
 | `zones-init` | `[--max N]` | Run `discover`, then add any newly-found groups to the config as "Zone N" — existing names are kept. |
 | `rename` | `<group> <name>` | Set a zone's display name in the config. |
 | `set-host` | `<host> [port]` | Set the gateway host/port in the config (default port 80). |
+| `set-icon-temp` | `<mode>` | Set the bar icon's temperature display: `avg`, `min`, `max`, or `off`. |
 
 `mit.py`'s `Mode`/`FanSpeed` enums also define `HEAT`, `AUTO` (mode), and
 `LOW` (fan speed), but this hardware silently rejects all three — the

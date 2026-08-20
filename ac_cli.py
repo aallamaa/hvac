@@ -22,6 +22,9 @@ CONFIG_FILE = os.environ.get("AC_CONFIG_FILE", os.path.expanduser("~/.config/ac-
 DEFAULT_CONFIG = {
     "host": "192.168.1.2",
     "port": 80,
+    # What the bar icon shows next to the snowflake for the zones that are
+    # currently on: "avg" (default), "min", "max", or "off" (icon only).
+    "icon_temp": "avg",
     "zones": {
         "1": "Zone 1",
         "2": "Zone 2",
@@ -31,6 +34,8 @@ DEFAULT_CONFIG = {
         "6": "Zone 6",
     },
 }
+
+ICON_TEMP_MODES = ("avg", "min", "max", "off")
 
 DISCOVER_MAX = 16
 
@@ -62,6 +67,7 @@ def save_config(config):
     to_write = {
         "host": config["host"],
         "port": config["port"],
+        "icon_temp": config.get("icon_temp", "avg"),
         "zones": dict(sorted(config["zones"].items(), key=lambda kv: int(kv[0]))),
     }
     with open(CONFIG_FILE, "w") as f:
@@ -147,6 +153,9 @@ def main():
     p.add_argument("host")
     p.add_argument("port", type=int, nargs="?", default=80)
 
+    p = sub.add_parser("set-icon-temp")
+    p.add_argument("mode", choices=ICON_TEMP_MODES)
+
     args = parser.parse_args()
     config = load_config()
 
@@ -187,6 +196,10 @@ def main():
             print(json.dumps({"found": found, "zones": saved["zones"]}))
         elif args.cmd == "rename":
             config["zones"][str(args.group)] = args.name
+            saved = save_config(config)
+            print(json.dumps(saved))
+        elif args.cmd == "set-icon-temp":
+            config["icon_temp"] = args.mode
             saved = save_config(config)
             print(json.dumps(saved))
         elif args.cmd == "set-host":

@@ -24,14 +24,34 @@ Panel {
 
   readonly property var activeZones: zones.filter(function(z) { return z.drive === "ON" })
   readonly property bool anyOn: activeZones.length > 0
-  readonly property string avgTempLabel: {
+
+  readonly property var iconTempModes: ["avg", "min", "max", "off"]
+  property string iconTempMode: "avg"
+
+  readonly property string tempSummaryLabel: {
+    if (root.iconTempMode === "off") return ""
     var withReading = activeZones.filter(function(z) { return typeof z.inletTemp === "number" })
     if (withReading.length === 0) return ""
-    var sum = 0
-    for (var i = 0; i < withReading.length; i++) sum += withReading[i].inletTemp
-    return Math.round(sum / withReading.length) + "°"
+    var vals = withReading.map(function(z) { return z.inletTemp })
+    var result
+    if (root.iconTempMode === "min") {
+      result = Math.min.apply(null, vals)
+    } else if (root.iconTempMode === "max") {
+      result = Math.max.apply(null, vals)
+    } else {
+      var sum = 0
+      for (var i = 0; i < vals.length; i++) sum += vals[i]
+      result = sum / vals.length
+    }
+    return Math.round(result) + "°"
   }
   readonly property string icon: "❄"
+
+  function cycleIconTempMode() {
+    var idx = root.iconTempModes.indexOf(root.iconTempMode)
+    var next = root.iconTempModes[(idx + 1) % root.iconTempModes.length]
+    enqueue(["set-icon-temp", next])
+  }
 
   readonly property color onColor: "#5fbf6f"
   readonly property color coolColor: "#5aa9e6"
@@ -59,6 +79,19 @@ Panel {
 
   function refresh() {
     if (!statusProc.running) statusProc.running = true
+  }
+
+  function refreshConfig() {
+    if (!configProc.running) configProc.running = true
+  }
+
+  function updateConfig(raw) {
+    try {
+      var data = JSON.parse(raw)
+      if (root.iconTempModes.indexOf(data.icon_temp) !== -1) root.iconTempMode = data.icon_temp
+    } catch (e) {
+      // Keep the current mode on a bad/empty response.
+    }
   }
 
   function updateZones(raw) {
@@ -130,7 +163,10 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) refresh()
-  Component.onCompleted: refresh()
+  Component.onCompleted: {
+    refresh()
+    refreshConfig()
+  }
 
   Process {
     id: statusProc
@@ -149,6 +185,15 @@ Panel {
   }
 
   Process {
+    id: configProc
+    command: ["/usr/bin/python3", root.cliPath, "config"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.updateConfig(text)
+    }
+  }
+
+  Process {
     id: actionProc
     stderr: StdioCollector {
       id: actionErrText
@@ -160,6 +205,7 @@ Panel {
         root.lastError = t !== "" ? t : "Action failed"
       }
       root.refresh()
+      root.refreshConfig()
       root.drainQueue()
     }
   }
@@ -184,7 +230,7 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.anyOn && root.avgTempLabel !== "" ? (root.icon + " " + root.avgTempLabel) : root.icon
+    text: root.anyOn && root.tempSummaryLabel !== "" ? (root.icon + " " + root.tempSummaryLabel) : root.icon
     onPressed: function(b) { root.toggle() }
   }
 
@@ -230,6 +276,18 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(4)
+
+            Button {
+              text: "Icon: " + root.iconTempMode.toUpperCase()
+              tooltipText: "Bar icon temperature: click to cycle avg / min / max / off"
+              fontSize: Style.font.caption
+              horizontalPadding: Style.space(6)
+              verticalPadding: Style.space(2)
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              bordered: true
+              onClicked: root.cycleIconTempMode()
+            }
 
             Button {
               text: "All On"
