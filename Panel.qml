@@ -30,6 +30,30 @@ Panel {
   }
   readonly property string icon: "❄"
 
+  readonly property color onColor: "#5fbf6f"
+  readonly property color coolColor: "#5aa9e6"
+  readonly property color heatColor: "#e0724a"
+  readonly property color dryColor: "#e0b64a"
+  readonly property color fanModeColor: "#5ac8b0"
+  readonly property color autoColor: "#a888e0"
+
+  function modeColor(mode) {
+    if (mode === "COOL" || mode === "AUTOCOOL") return root.coolColor
+    if (mode === "HEAT") return root.heatColor
+    if (mode === "DRY") return root.dryColor
+    if (mode === "FAN") return root.fanModeColor
+    if (mode === "AUTO") return root.autoColor
+    return root.bar.foreground
+  }
+
+  function fanColor(speed) {
+    if (speed === "LOW") return "#5fbf6f"
+    if (speed === "MID1") return "#a3c95a"
+    if (speed === "MID2") return "#e0b64a"
+    if (speed === "HIGH") return "#e0724a"
+    return root.bar.foreground
+  }
+
   function refresh() {
     if (!statusProc.running) statusProc.running = true
   }
@@ -279,7 +303,7 @@ Panel {
         fontSize: Style.font.caption
         horizontalPadding: Style.space(5)
         verticalPadding: Style.space(2)
-        foreground: zoneRow.zone.drive === "ON" ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.6)
+        foreground: zoneRow.zone.drive === "ON" ? root.onColor : Color.muted
         fontFamily: root.bar.fontFamily
         bordered: true
         active: zoneRow.zone.drive === "ON"
@@ -330,7 +354,7 @@ Panel {
           fontSize: Style.font.caption
           horizontalPadding: Style.space(6)
           verticalPadding: Style.space(2)
-          foreground: root.bar.foreground
+          foreground: zoneRow.zone.drive === "ON" ? root.modeColor(zoneRow.zone.mode) : Color.muted
           fontFamily: root.bar.fontFamily
           bordered: true
           onClicked: root.cycleMode(zoneRow.zone)
@@ -341,7 +365,7 @@ Panel {
           fontSize: Style.font.caption
           horizontalPadding: Style.space(6)
           verticalPadding: Style.space(2)
-          foreground: root.bar.foreground
+          foreground: zoneRow.zone.drive === "ON" ? root.fanColor(zoneRow.zone.fanSpeed) : Color.muted
           fontFamily: root.bar.fontFamily
           bordered: true
           onClicked: root.cycleFan(zoneRow.zone)
