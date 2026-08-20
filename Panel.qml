@@ -22,15 +22,14 @@ Panel {
   property string lastError: ""
   property var pendingQueue: []
 
-  readonly property var activeZones: zones.filter(function(z) { return z.drive === "ON" })
-  readonly property bool anyOn: activeZones.length > 0
-
   readonly property var iconTempModes: ["avg", "min", "max", "off"]
   property string iconTempMode: "avg"
 
+  // Room temperature is a live sensor reading independent of drive state,
+  // so this covers every zone, not just the ones currently on.
   readonly property string tempSummaryLabel: {
     if (root.iconTempMode === "off") return ""
-    var withReading = activeZones.filter(function(z) { return typeof z.inletTemp === "number" })
+    var withReading = zones.filter(function(z) { return typeof z.inletTemp === "number" })
     if (withReading.length === 0) return ""
     var vals = withReading.map(function(z) { return z.inletTemp })
     var result
@@ -230,7 +229,7 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.anyOn && root.tempSummaryLabel !== "" ? (root.icon + " " + root.tempSummaryLabel) : root.icon
+    text: root.tempSummaryLabel !== "" ? (root.icon + " " + root.tempSummaryLabel) : root.icon
     onPressed: function(b) { root.toggle() }
   }
 
