@@ -45,11 +45,12 @@ Panel {
     }
     return Math.round(result) + "°"
   }
-  // A real Nerd Font glyph (JetBrainsMono Nerd Font "weather-snow"), not the
-  // Unicode snowflake (U+2744) - that one gets rendered by a color-emoji
-  // fallback font that ignores the `color` property entirely, which is why
-  // the bar icon used to always render blue regardless of active/urgent state.
-  readonly property string icon: ""
+  // A real Nerd Font glyph (JetBrainsMono Nerd Font "md-snowflake", U+F0717),
+  // not the Unicode snowflake (U+2744) - that one gets rendered by a
+  // color-emoji fallback font that ignores the `color` property entirely,
+  // which is why the bar icon used to always render blue regardless of
+  // active/urgent state.
+  readonly property string icon: "󰜗"
 
   function cycleIconTempMode() {
     var idx = root.iconTempModes.indexOf(root.iconTempMode)
