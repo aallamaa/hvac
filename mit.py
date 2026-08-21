@@ -1,8 +1,15 @@
+import signal
 import xml.etree.ElementTree as ET
 import requests
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Union
 from enum import Enum
+
+
+class _RequestTimedOut(Exception):
+    """Internal signal-alarm sentinel; never escapes this module."""
+    pass
+
 
 class DriveState(Enum):
     ON = "ON"
@@ -73,15 +80,30 @@ class HVACUnit:
 class MNetController:
     """M-NET HVAC Controller"""
 
-    # (connect timeout, read timeout) in seconds. Read applies between
-    # chunks, not to total response time - combined with the response size
-    # cap below, this bounds both a stalled connection and a slow trickle.
+    # (connect timeout, read timeout) in seconds. Both are inactivity
+    # timeouts - read resets on every chunk received, so on their own they
+    # don't bound total request duration against a slow trickle. That's
+    # what MAX_REQUEST_SECONDS below is for.
     REQUEST_TIMEOUT = (5, 10)
 
     # Real status/set responses are a few KB of XML; this is generous
     # headroom while still bounding memory use against a misbehaving or
     # malicious endpoint.
     MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
+    # Hard wall-clock ceiling for the whole request. A sender that keeps
+    # individual gaps under the read timeout (e.g. one byte every few
+    # seconds) could otherwise hold the connection open indefinitely while
+    # staying under the byte cap - checking elapsed time between
+    # iter_content() chunks doesn't reliably catch this, since a
+    # content-length-less, non-chunked response can leave iter_content
+    # blocked well past a single chunk's read timeout before it yields
+    # anything at all. SIGALRM interrupts the blocking call directly
+    # regardless of how requests/urllib3 buffers internally. Only safe to
+    # call from the main thread - fine here, this is a short-lived,
+    # single-threaded CLI helper, not a library meant for embedding in a
+    # multi-threaded app.
+    MAX_REQUEST_SECONDS = 15
 
     def __init__(self, host: str = "192.168.1.2", port: int = 80):
         self.host = host
@@ -117,6 +139,11 @@ class MNetController:
     
     def _send_request(self, xml_data: str) -> requests.Response:
         """Send XML request to M-NET device"""
+        def _on_alarm(signum, frame):
+            raise _RequestTimedOut()
+
+        old_handler = signal.signal(signal.SIGALRM, _on_alarm)
+        signal.alarm(self.MAX_REQUEST_SECONDS)
         try:
             response = requests.post(
                 self.url,
@@ -124,7 +151,19 @@ class MNetController:
                 data=xml_data,
                 timeout=self.REQUEST_TIMEOUT,
                 stream=True,
+                # This is a fixed, single-purpose client for one configured
+                # gateway; it never has a legitimate reason to redirect.
+                # Following one would (a) let a redirect's body dodge the
+                # size cap below, since requests fully reads intermediate
+                # redirect responses before this code ever sees them, and
+                # (b) let a spoofed/misconfigured gateway redirect our
+                # control payload to an arbitrary origin.
+                allow_redirects=False,
             )
+            if 300 <= response.status_code < 400:
+                location = response.headers.get("Location", "<none>")
+                response.close()
+                raise ValueError(f"M-NET gateway returned unexpected redirect to {location!r}")
             response.raise_for_status()
 
             chunks = []
@@ -148,8 +187,13 @@ class MNetController:
                 print("Response XML:")
                 print(response.text)
             return response
+        except _RequestTimedOut:
+            raise Exception(f"M-NET request exceeded {self.MAX_REQUEST_SECONDS}s wall-clock limit")
         except requests.RequestException as e:
             raise Exception(f"M-NET communication failed: {e}")
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
     
     def _parse_response(self, xml_response: str) -> List[HVACUnit]:
         """Parse XML response into HVACUnit objects"""
