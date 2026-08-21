@@ -298,7 +298,9 @@ Panel {
             spacing: Style.space(4)
 
             Button {
-              text: "Icon: " + root.iconTempMode.toUpperCase()
+              text: root.iconTempMode === "off"
+                ? "OFF"
+                : root.iconTempMode.toUpperCase() + ": " + (root.tempSummaryLabel !== "" ? root.tempSummaryLabel : "—")
               tooltipText: "Bar icon temperature: click to cycle avg / min / max / off"
               fontSize: Style.font.caption
               horizontalPadding: Style.space(6)
