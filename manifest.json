@@ -4,6 +4,7 @@
   "name": "AC Control",
   "version": "1.0.0",
   "author": "kader",
+  "license": "GPL-3.0-or-later",
   "description": "Mitsubishi M-NET HVAC control: per-zone status, on/off, mode, temperature, fan speed",
   "kinds": [
     "bar-widget"

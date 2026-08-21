@@ -8,30 +8,51 @@ If the gateway can't be reached (or the status call fails for any reason),
 the bar icon switches to the theme's urgent/red color and drops the
 temperature reading rather than showing a stale value.
 
-## Files
+![preview](preview.png)
 
-- `mit.py` — M-NET client (XML over HTTP to the gateway). Not modified by
-  this plugin; used as a library.
-- `ac_cli.py` — CLI wrapper around `mit.py`. The QML shells out to this for
-  every read and write; it's also usable standalone from a terminal.
-- `Panel.qml` — the bar icon + popup (Quickshell/QML).
-- `manifest.json` — Omarchy plugin manifest (`id: mhvac.ac`).
+## Requirements
 
-## Deployment
+- A Mitsubishi M-NET HVAC system reachable over the network through an
+  HTTP/XML gateway (`servlet/MIMEReceiveServlet`) — this is a specific
+  integration, not a generic "any AC" plugin. If your gateway doesn't
+  speak this protocol, this plugin won't talk to it.
+- `python3` on `PATH`, with the `requests` package installed
+  (`pip install requests`, or your distro's package).
+- Network access from the machine running Omarchy to the gateway.
 
-Omarchy's plugin loader reads from `~/.config/omarchy/plugins/mhvac.ac/`,
-and its validator (`omarchy plugin validate`) rejects symlinks inside a
-plugin folder — so that directory holds real copies, not a symlink back
-here. After editing files in this repo, redeploy with:
+No elevated privileges are needed — everything runs as your normal user.
+
+## Install
 
 ```bash
-cp mit.py ac_cli.py Panel.qml manifest.json ~/.config/omarchy/plugins/mhvac.ac/
+omarchy plugin add https://github.com/aallamaa/hvac.git --enable
 ```
 
-QML edits hot-reload automatically once copied; if changes don't seem to
-apply, `omarchy restart shell` forces a clean reload.
+Then place it on the bar (if `--enable` didn't already):
 
-## Configuration
+```bash
+omarchy bar move mhvac.ac --section right
+```
+
+## Usage
+
+Click the snowflake icon in the bar to open the popup. Each zone shows:
+
+- a power button (on/off)
+- the current room temperature
+- a mode button (cycles through that zone's supported modes)
+- a fan-speed button (cycles through that zone's supported speeds)
+- a −/+ temperature stepper
+
+"All On"/"All Off" at the top act on every configured zone. The "AVG: N°"
+button next to them cycles the bar icon's own temperature display through
+`avg`/`min`/`max`/`off` (see Configure).
+
+The bar icon itself shows the icon-only when nothing's on, an aggregate
+temperature reading otherwise, and turns the theme's urgent/red color if
+the gateway can't be reached.
+
+## Configure
 
 Gateway host/port, zone names, and per-zone capabilities live in
 `~/.config/ac-plugin/config.json`, not in the code:
@@ -51,19 +72,29 @@ Gateway host/port, zone names, and per-zone capabilities live in
 `icon_temp` controls what number the bar icon shows next to the snowflake
 for the zones that are currently on (icon-only when everything's off):
 `avg` (default), `min`, `max`, or `off`. It's also editable straight from
-the popup — the "Icon: AVG" button in the header cycles through the four
+the popup — the "AVG: N°" button in the header cycles through the four
 values.
 
 `modes`/`fan_speeds` are what the popup's mode/fan cycle buttons step
 through for that zone — see "Per-zone capability discovery" below for
 where they come from. A zone can also be given as a plain name string
 (`"1": "Living room"`); it's upgraded on load to the full shape above,
-filled in with the not-yet-discovered defaults.
+filled in with not-yet-discovered defaults.
 
 If this file is missing, `ac_cli.py` falls back to built-in defaults
 (`192.168.1.2`, zones 1–6 named "Zone N") so the plugin still works out of
-the box. `AC_CONFIG_FILE` overrides the path; `AC_HOST` / `AC_PORT` env
-vars override the host/port from the file for one-off use.
+the box on first install — you'll want to point it at your own gateway
+and zones, though. `AC_CONFIG_FILE` overrides the path; `AC_HOST` /
+`AC_PORT` env vars override the host/port from the file for one-off use.
+
+### Finding your zones
+
+```bash
+ac discover --max 16   # probe groups 1..16, report which respond
+ac zones-init          # same, then add any newly-found groups to the config
+ac rename 3 "Kids room"
+ac set-host 192.168.1.50
+```
 
 ### Per-zone capability discovery
 
@@ -91,7 +122,43 @@ zone's results are saved to the config as soon as that zone finishes, so
 an interruption doesn't lose earlier zones' results. It takes a few
 seconds per zone.
 
-## Running commands directly
+## Remove
+
+```bash
+omarchy plugin remove mhvac.ac --yes
+```
+
+That removes the plugin from the bar and deletes
+`~/.config/omarchy/plugins/mhvac.ac/`. It leaves two things behind, which
+you can delete yourself if you want a full cleanup:
+
+```bash
+rm -rf ~/.config/ac-plugin           # host/zone/capability config
+rm -f ~/.local/bin/ac                # the `ac` CLI shortcut, if installed
+```
+
+## Development
+
+Source of truth is this repo; `~/.config/omarchy/plugins/mhvac.ac/` holds
+a deployed copy (Omarchy's plugin validator rejects symlinks inside a
+plugin folder, so it can't just point back here). After editing files,
+redeploy with:
+
+```bash
+cp mit.py ac_cli.py Panel.qml manifest.json ~/.config/omarchy/plugins/mhvac.ac/
+```
+
+QML edits hot-reload automatically once copied; if changes don't seem to
+apply, `omarchy restart shell` forces a clean reload.
+
+- `mit.py` — M-NET client (XML over HTTP to the gateway), used as a
+  library.
+- `ac_cli.py` — CLI wrapper around `mit.py`. The QML shells out to this
+  for every read and write; it's also usable standalone from a terminal.
+- `Panel.qml` — the bar icon + popup (Quickshell/QML).
+- `manifest.json` — Omarchy plugin manifest (`id: mhvac.ac`).
+
+### Running ac_cli.py commands directly
 
 There's no `omarchy plugin <id> <command>` passthrough — `omarchy plugin`
 only manages plugin lifecycle (list/enable/disable/validate). To run
@@ -120,8 +187,8 @@ on failure it prints `{"error": "..."}` to stderr and exits 1.
 | `on` | `<group>` | Turn a zone on. |
 | `off` | `<group>` | Turn a zone off. |
 | `set-temp` | `<group> <temp>` | Set target temperature (16–30). |
-| `set-fan` | `<group> <speed>` | Set fan speed: `AUTO`, `LOW`, `MID1`, `MID2`, or `HIGH`. Not every zone accepts every value — see below. |
-| `set-mode` | `<group> <mode>` | Set mode: `COOL`, `HEAT`, `DRY`, `FAN`, or `AUTO`. Not every zone accepts every value — see below. |
+| `set-fan` | `<group> <speed>` | Set fan speed: `AUTO`, `LOW`, `MID1`, `MID2`, or `HIGH`. Not every zone accepts every value — see "Per-zone capability discovery". |
+| `set-mode` | `<group> <mode>` | Set mode: `COOL`, `HEAT`, `DRY`, `FAN`, or `AUTO`. Not every zone accepts every value — see "Per-zone capability discovery". |
 | `all-on` | | Turn on every configured zone. |
 | `all-off` | | Turn off every configured zone. |
 | `discover` | `[--max N]` | Probe groups `1..N` (default 16) one at a time and report which respond. Doesn't touch the config. |
@@ -146,3 +213,7 @@ ac discover-features
 ac discover-features 6
 ac set-host 192.168.1.2
 ```
+
+## License
+
+GPL-3.0-or-later — see [LICENSE](LICENSE).
