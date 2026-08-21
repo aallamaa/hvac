@@ -12,6 +12,31 @@ Panel {
 
   readonly property string cliPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/mhvac.ac/ac_cli.py"
 
+  // Neutralizes rich-text markup before a string reaches any Text/tooltip
+  // sink. Zone names are user-configurable (`ac rename`), and error text
+  // ultimately originates from whatever host is configured as the gateway -
+  // an attacker who can respond on that host/port (e.g. a spoofed device on
+  // the LAN, or a mistyped `set-host`) could otherwise embed markup into an
+  // HTTP reason phrase and have it rendered as rich text.
+  function sanitizeText(s) {
+    if (typeof s !== "string") return s
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  }
+
+  // ac_cli.py prints {"error": "..."} to stderr on failure; pull out just
+  // the message instead of showing the raw JSON blob.
+  function extractErrorMessage(raw) {
+    var t = String(raw || "").trim()
+    if (t === "") return ""
+    try {
+      var parsed = JSON.parse(t)
+      if (parsed && typeof parsed.error === "string") return parsed.error
+    } catch (e) {
+      // Not JSON (or malformed) - fall through to the raw text.
+    }
+    return t
+  }
+
   // Fallback used only for a zone whose config hasn't been through
   // `ac_cli.py discover-features` yet - each zone normally carries its own
   // modes/fanSpeeds from status (different indoor unit models on the same
@@ -108,7 +133,7 @@ Panel {
         var u = data[i]
         next.push({
           group: u.group,
-          name: u.name || ("Zone " + u.group),
+          name: root.sanitizeText(u.name) || ("Zone " + u.group),
           drive: u.drive,
           mode: u.mode,
           setTemp: u.set_temp,
@@ -216,8 +241,8 @@ Panel {
     }
     onExited: function(exitCode) {
       if (exitCode !== 0) {
-        var t = String(actionErrText.text || "").trim()
-        root.lastError = t !== "" ? t : "Action failed"
+        var msg = root.extractErrorMessage(actionErrText.text)
+        root.lastError = root.sanitizeText(msg !== "" ? msg : "Action failed")
       }
       root.refresh()
       root.refreshConfig()
@@ -281,6 +306,7 @@ Panel {
           implicitHeight: Math.max(heroTitle.implicitHeight, heroActions.implicitHeight)
 
           Text {
+            textFormat: Text.PlainText
             id: heroTitle
             text: "AC"
             color: root.bar.foreground
@@ -336,6 +362,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.lastError !== ""
           text: root.lastError
           color: root.bar.urgent
@@ -358,6 +385,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.zones.length === 0 && root.lastError === ""
             text: "Loading…"
             color: root.bar.foreground
@@ -396,6 +424,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         id: zoneName
         text: zoneRow.zone.name
         color: root.bar.foreground
@@ -411,6 +440,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         id: zoneTemp
         text: typeof zoneRow.zone.inletTemp === "number" ? zoneRow.zone.inletTemp.toFixed(1) + "°" : "—"
         color: root.bar.foreground
@@ -473,6 +503,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           text: (zoneRow.zone.setTemp === null || zoneRow.zone.setTemp === undefined ? "—" : zoneRow.zone.setTemp) + "°"
           color: root.bar.foreground
           font.family: root.bar.fontFamily

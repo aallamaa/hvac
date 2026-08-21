@@ -72,7 +72,17 @@ class HVACUnit:
 
 class MNetController:
     """M-NET HVAC Controller"""
-    
+
+    # (connect timeout, read timeout) in seconds. Read applies between
+    # chunks, not to total response time - combined with the response size
+    # cap below, this bounds both a stalled connection and a slow trickle.
+    REQUEST_TIMEOUT = (5, 10)
+
+    # Real status/set responses are a few KB of XML; this is generous
+    # headroom while still bounding memory use against a misbehaving or
+    # malicious endpoint.
+    MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
     def __init__(self, host: str = "192.168.1.2", port: int = 80):
         self.host = host
         self.port = port
@@ -108,8 +118,30 @@ class MNetController:
     def _send_request(self, xml_data: str) -> requests.Response:
         """Send XML request to M-NET device"""
         try:
-            response = requests.post(self.url, headers=self.headers, data=xml_data)
+            response = requests.post(
+                self.url,
+                headers=self.headers,
+                data=xml_data,
+                timeout=self.REQUEST_TIMEOUT,
+                stream=True,
+            )
             response.raise_for_status()
+
+            chunks = []
+            total = 0
+            for chunk in response.iter_content(chunk_size=8192):
+                total += len(chunk)
+                if total > self.MAX_RESPONSE_BYTES:
+                    response.close()
+                    raise ValueError(
+                        f"M-NET response exceeded {self.MAX_RESPONSE_BYTES} byte limit"
+                    )
+                chunks.append(chunk)
+            # Populate the usual response.text/.content lazily-loaded cache
+            # so callers don't need to know this read happened manually.
+            response._content = b"".join(chunks)
+            response._content_consumed = True
+
             if self.debug:
                 print("Request XML:")
                 print(xml_data)
