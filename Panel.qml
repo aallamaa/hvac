@@ -20,6 +20,7 @@ Panel {
 
   property var zones: []
   property string lastError: ""
+  property bool unreachable: false
   property var pendingQueue: []
 
   readonly property var iconTempModes: ["avg", "min", "max", "off"]
@@ -44,7 +45,11 @@ Panel {
     }
     return Math.round(result) + "°"
   }
-  readonly property string icon: "❄"
+  // A real Nerd Font glyph (JetBrainsMono Nerd Font "weather-snow"), not the
+  // Unicode snowflake (U+2744) - that one gets rendered by a color-emoji
+  // fallback font that ignores the `color` property entirely, which is why
+  // the bar icon used to always render blue regardless of active/urgent state.
+  readonly property string icon: ""
 
   function cycleIconTempMode() {
     var idx = root.iconTempModes.indexOf(root.iconTempMode)
@@ -112,8 +117,10 @@ Panel {
       next.sort(function(a, b) { return a.group - b.group })
       root.zones = next
       root.lastError = ""
+      root.unreachable = false
     } catch (e) {
       root.lastError = "Bad status response"
+      root.unreachable = true
     }
   }
 
@@ -178,7 +185,10 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         var t = String(text || "").trim()
-        if (t !== "") root.lastError = "Can't reach AC gateway"
+        if (t !== "") {
+          root.lastError = "Can't reach AC gateway"
+          root.unreachable = true
+        }
       }
     }
   }
@@ -229,7 +239,12 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.tempSummaryLabel !== "" ? (root.icon + " " + root.tempSummaryLabel) : root.icon
+    // Suppress the temperature while unreachable - it would just be a stale
+    // last-known reading presented as current. The color change (urgent/red)
+    // is the actual "can't reach the gateway" signal.
+    text: !root.unreachable && root.tempSummaryLabel !== "" ? (root.icon + " " + root.tempSummaryLabel) : root.icon
+    active: root.unreachable
+    tooltipText: root.unreachable ? (root.lastError || "Can't reach AC gateway") : ""
     onPressed: function(b) { root.toggle() }
   }
 

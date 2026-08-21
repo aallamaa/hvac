@@ -4,6 +4,10 @@ Bar widget for the Omarchy shell (Quickshell) that controls a Mitsubishi
 M-NET HVAC system: per-zone status, on/off, mode, temperature, and fan
 speed, from a popup anchored to a bar icon.
 
+If the gateway can't be reached (or the status call fails for any reason),
+the bar icon switches to the theme's urgent/red color and drops the
+temperature reading rather than showing a stale value.
+
 ## Files
 
 - `mit.py` — M-NET client (XML over HTTP to the gateway). Not modified by
