@@ -33,7 +33,7 @@ apply, `omarchy restart shell` forces a clean reload.
 
 ## Configuration
 
-Gateway host/port and zone (group number → name) live in
+Gateway host/port, zone names, and per-zone capabilities live in
 `~/.config/ac-plugin/config.json`, not in the code:
 
 ```json
@@ -42,8 +42,8 @@ Gateway host/port and zone (group number → name) live in
   "port": 80,
   "icon_temp": "avg",
   "zones": {
-    "1": "Living room",
-    "2": "Kitchen"
+    "1": { "name": "Living room", "modes": ["COOL", "DRY", "FAN"], "fan_speeds": ["AUTO", "MID1", "MID2", "HIGH"] },
+    "6": { "name": "Office", "modes": ["COOL", "HEAT", "DRY", "FAN"], "fan_speeds": ["LOW", "MID1", "MID2", "HIGH"] }
   }
 }
 ```
@@ -54,10 +54,42 @@ for the zones that are currently on (icon-only when everything's off):
 the popup — the "Icon: AVG" button in the header cycles through the four
 values.
 
+`modes`/`fan_speeds` are what the popup's mode/fan cycle buttons step
+through for that zone — see "Per-zone capability discovery" below for
+where they come from. A zone can also be given as a plain name string
+(`"1": "Living room"`); it's upgraded on load to the full shape above,
+filled in with the not-yet-discovered defaults.
+
 If this file is missing, `ac_cli.py` falls back to built-in defaults
 (`192.168.1.2`, zones 1–6 named "Zone N") so the plugin still works out of
 the box. `AC_CONFIG_FILE` overrides the path; `AC_HOST` / `AC_PORT` env
 vars override the host/port from the file for one-off use.
+
+### Per-zone capability discovery
+
+Different indoor unit models on the same M-NET system can support
+different modes and fan speeds — on this installation, one zone (a
+heat-pump unit) supports `HEAT` and `LOW` fan speed while the rest
+(cooling-only units) reject both. Rather than guess, `discover-features`
+finds out empirically per zone: for each candidate mode/fan speed, it
+writes the value and reads status back to see whether it actually took —
+one that's silently rejected reads back unchanged.
+
+```bash
+ac discover-features        # every configured zone
+ac discover-features 6      # just zone/group 6
+```
+
+For each zone this temporarily turns it off (a setting is easier to tell
+apart from "didn't take" when the compressor isn't also reacting), steps
+through `COOL`/`HEAT`/`DRY`/`FAN`/`AUTO` and `AUTO`/`LOW`/`MID1`/`MID2`/`HIGH`,
+then restores its original mode, fan speed, set temperature, and on/off
+state before moving to the next zone. `AUTOCOOL`/`AUTOHEAT` aren't tested —
+per Mitsubishi's own M-NET gateway spec they're read-only status values a
+unit reports while running under `AUTO`, never something you write. Each
+zone's results are saved to the config as soon as that zone finishes, so
+an interruption doesn't lose earlier zones' results. It takes a few
+seconds per zone.
 
 ## Running commands directly
 
@@ -88,22 +120,16 @@ on failure it prints `{"error": "..."}` to stderr and exits 1.
 | `on` | `<group>` | Turn a zone on. |
 | `off` | `<group>` | Turn a zone off. |
 | `set-temp` | `<group> <temp>` | Set target temperature (16–30). |
-| `set-fan` | `<group> <speed>` | Set fan speed: `AUTO`, `MID1`, `MID2`, `HIGH`. |
-| `set-mode` | `<group> <mode>` | Set mode: `COOL`, `DRY`, `FAN`. |
+| `set-fan` | `<group> <speed>` | Set fan speed: `AUTO`, `LOW`, `MID1`, `MID2`, or `HIGH`. Not every zone accepts every value — see below. |
+| `set-mode` | `<group> <mode>` | Set mode: `COOL`, `HEAT`, `DRY`, `FAN`, or `AUTO`. Not every zone accepts every value — see below. |
 | `all-on` | | Turn on every configured zone. |
 | `all-off` | | Turn off every configured zone. |
 | `discover` | `[--max N]` | Probe groups `1..N` (default 16) one at a time and report which respond. Doesn't touch the config. |
 | `zones-init` | `[--max N]` | Run `discover`, then add any newly-found groups to the config as "Zone N" — existing names are kept. |
+| `discover-features` | `[group]` | Probe which modes/fan speeds a zone (or every zone, if omitted) actually accepts and save them to the config. |
 | `rename` | `<group> <name>` | Set a zone's display name in the config. |
 | `set-host` | `<host> [port]` | Set the gateway host/port in the config (default port 80). |
 | `set-icon-temp` | `<mode>` | Set the bar icon's temperature display: `avg`, `min`, `max`, or `off`. |
-
-`mit.py`'s `Mode`/`FanSpeed` enums also define `HEAT`, `AUTO` (mode), and
-`LOW` (fan speed), but this hardware silently rejects all three — the
-gateway acks the write and the setting never actually changes, confirmed
-both with the zone on and off. This is a cooling-only unit with no heat
-pump; the plugin's mode/fan cycle buttons only cycle through the values
-that actually stick.
 
 ### Examples
 
@@ -116,5 +142,7 @@ ac set-mode 3 COOL
 ac rename 3 "Kids room"
 ac discover --max 10
 ac zones-init
+ac discover-features
+ac discover-features 6
 ac set-host 192.168.1.2
 ```

@@ -4,20 +4,36 @@
 Every subcommand prints one JSON value to stdout and exits 0 on success.
 On failure it prints {"error": "..."} to stderr and exits 1.
 
-Gateway host/port and zone (group -> name) config live in a single JSON
-file instead of being hardcoded, so the hardware setup can change without
-touching this script or the QML. See CONFIG_FILE below.
+Gateway host/port and zone (group -> name/capabilities) config live in a
+single JSON file instead of being hardcoded, so the hardware setup can
+change without touching this script or the QML. See CONFIG_FILE below.
 """
 import argparse
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mit import MNetController, Mode, FanSpeed
 
 CONFIG_FILE = os.environ.get("AC_CONFIG_FILE", os.path.expanduser("~/.config/ac-plugin/config.json"))
+
+# Real, user-facing write targets. AUTOCOOL/AUTOHEAT are excluded on purpose:
+# per Mitsubishi's own M-NET BACnet gateway spec they're "Not settable" -
+# read-only status the unit reports while running under AUTO, never
+# something you write.
+ALL_MODES = ["COOL", "HEAT", "DRY", "FAN", "AUTO"]
+ALL_FAN_SPEEDS = ["AUTO", "LOW", "MID1", "MID2", "HIGH"]
+
+# Fallback for a zone that hasn't been through `discover-features` yet.
+# Narrower than the full candidate lists above - COOL/DRY/FAN and
+# AUTO/MID1/MID2/HIGH are confirmed working on this installation's units,
+# whereas HEAT/AUTO mode and LOW fan speed are known to be silently
+# rejected by at least one of them.
+DEFAULT_MODES = ["COOL", "DRY", "FAN"]
+DEFAULT_FAN_SPEEDS = ["AUTO", "MID1", "MID2", "HIGH"]
 
 DEFAULT_CONFIG = {
     "host": "192.168.1.2",
@@ -39,6 +55,26 @@ ICON_TEMP_MODES = ("avg", "min", "max", "off")
 
 DISCOVER_MAX = 16
 
+# Gap between a set and the status read that checks it. The gateway has been
+# observed to need a moment to reflect a write; without this, a supported
+# value can read back as not-yet-applied and get misclassified as rejected.
+FEATURE_TEST_DELAY = 0.4
+
+
+def normalize_zone(entry, group):
+    """Upgrade a zone config entry to the {name, modes, fan_speeds} shape.
+
+    Older configs (and DEFAULT_CONFIG) store zones as a plain name string;
+    this fills in the not-yet-discovered defaults for those.
+    """
+    if isinstance(entry, str):
+        return {"name": entry, "modes": list(DEFAULT_MODES), "fan_speeds": list(DEFAULT_FAN_SPEEDS)}
+    return {
+        "name": entry.get("name") or "Zone {}".format(group),
+        "modes": entry.get("modes") or list(DEFAULT_MODES),
+        "fan_speeds": entry.get("fan_speeds") or list(DEFAULT_FAN_SPEEDS),
+    }
+
 
 def load_config():
     try:
@@ -49,9 +85,9 @@ def load_config():
 
     config = dict(DEFAULT_CONFIG)
     config.update({k: v for k, v in data.items() if k != "zones"})
-    zones = dict(DEFAULT_CONFIG["zones"])
-    zones.update(data.get("zones") or {})
-    config["zones"] = zones
+    zones_raw = dict(DEFAULT_CONFIG["zones"])
+    zones_raw.update(data.get("zones") or {})
+    config["zones"] = {g: normalize_zone(v, g) for g, v in zones_raw.items()}
 
     # Env vars win over the file, for one-off overrides without editing it.
     if os.environ.get("AC_HOST"):
@@ -64,11 +100,15 @@ def load_config():
 
 def save_config(config):
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    zones_out = {
+        g: {"name": z["name"], "modes": z["modes"], "fan_speeds": z["fan_speeds"]}
+        for g, z in config["zones"].items()
+    }
     to_write = {
         "host": config["host"],
         "port": config["port"],
         "icon_temp": config.get("icon_temp", "avg"),
-        "zones": dict(sorted(config["zones"].items(), key=lambda kv: int(kv[0]))),
+        "zones": dict(sorted(zones_out.items(), key=lambda kv: int(kv[0]))),
     }
     with open(CONFIG_FILE, "w") as f:
         json.dump(to_write, f, indent=2)
@@ -84,10 +124,12 @@ def groups_from_config(config):
     return sorted(int(g) for g in config["zones"].keys())
 
 
-def unit_to_dict(u, name):
+def unit_to_dict(u, zone_cfg):
     return {
         "group": u.group,
-        "name": name,
+        "name": zone_cfg["name"],
+        "modes": zone_cfg["modes"],
+        "fan_speeds": zone_cfg["fan_speeds"],
         "drive": u.drive.value if u.drive else None,
         "mode": u.mode.value if u.mode else None,
         "set_temp": u.set_temp,
@@ -112,6 +154,62 @@ def discover(config, max_group):
         except Exception:
             continue
     return found
+
+
+def discover_features(config, groups):
+    """Probe which modes and fan speeds each group actually accepts.
+
+    For each group: turn it off (a setting that doesn't stick is easiest to
+    tell apart from one that does when the compressor isn't also changing
+    the room), try every candidate value, and read back status to see
+    whether it took. Restores the zone's original mode/fan speed/set temp/
+    drive state when done, and saves each zone's results to the config as
+    it finishes so an interruption doesn't lose earlier zones' results.
+    """
+    ctrl = controller(config)
+    results = {}
+    for g in groups:
+        original = ctrl.get_unit_status(g)
+        was_on = original.drive is not None and original.drive.value == "ON"
+        if was_on:
+            ctrl.turn_off(g)
+            time.sleep(FEATURE_TEST_DELAY)
+
+        supported_modes = []
+        for m in ALL_MODES:
+            ctrl.set_mode(g, Mode(m))
+            time.sleep(FEATURE_TEST_DELAY)
+            check = ctrl.get_unit_status(g)
+            if check.mode is not None and check.mode.value == m:
+                supported_modes.append(m)
+
+        if original.mode is not None:
+            ctrl.set_mode(g, original.mode)
+
+        supported_fans = []
+        for speed in ALL_FAN_SPEEDS:
+            ctrl.set_fan_speed(g, FanSpeed(speed))
+            time.sleep(FEATURE_TEST_DELAY)
+            check = ctrl.get_unit_status(g)
+            if check.fan_speed is not None and check.fan_speed.value == speed:
+                supported_fans.append(speed)
+
+        if original.fan_speed is not None:
+            ctrl.set_fan_speed(g, original.fan_speed)
+        if original.set_temp is not None:
+            ctrl.set_temperature(g, original.set_temp)
+        if was_on:
+            ctrl.turn_on(g)
+
+        key = str(g)
+        zone_cfg = config["zones"].get(key) or normalize_zone("Zone {}".format(g), g)
+        zone_cfg["modes"] = supported_modes
+        zone_cfg["fan_speeds"] = supported_fans
+        config["zones"][key] = zone_cfg
+        results[g] = {"modes": supported_modes, "fan_speeds": supported_fans}
+        save_config(config)
+
+    return results
 
 
 def main():
@@ -144,6 +242,12 @@ def main():
 
     p = sub.add_parser("zones-init", help="Discover units and add any new ones to the config, keeping existing names")
     p.add_argument("--max", type=int, default=DISCOVER_MAX)
+
+    p = sub.add_parser(
+        "discover-features",
+        help="Probe which modes/fan speeds each zone actually accepts and save them to the config",
+    )
+    p.add_argument("group", type=int, nargs="?", help="Limit to one group; omit to run for every configured zone")
 
     p = sub.add_parser("rename")
     p.add_argument("group", type=int)
@@ -191,11 +295,20 @@ def main():
         elif args.cmd == "zones-init":
             found = discover(config, args.max)
             for g in found:
-                config["zones"].setdefault(str(g), "Zone {}".format(g))
+                key = str(g)
+                if key not in config["zones"]:
+                    config["zones"][key] = normalize_zone("Zone {}".format(g), g)
             saved = save_config(config)
             print(json.dumps({"found": found, "zones": saved["zones"]}))
+        elif args.cmd == "discover-features":
+            groups = [args.group] if args.group else groups_from_config(config)
+            results = discover_features(config, groups)
+            print(json.dumps({str(g): r for g, r in results.items()}))
         elif args.cmd == "rename":
-            config["zones"][str(args.group)] = args.name
+            key = str(args.group)
+            zone_cfg = config["zones"].get(key) or normalize_zone("Zone {}".format(args.group), args.group)
+            zone_cfg["name"] = args.name
+            config["zones"][key] = zone_cfg
             saved = save_config(config)
             print(json.dumps(saved))
         elif args.cmd == "set-icon-temp":

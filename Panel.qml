@@ -12,9 +12,10 @@ Panel {
 
   readonly property string cliPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/mvac.ac/ac_cli.py"
 
-  // HEAT and AUTO are rejected outright by this hardware (cooling-only
-  // unit, confirmed both on and off), and fan speed LOW is likewise
-  // rejected - only these values actually stick.
+  // Fallback used only for a zone whose config hasn't been through
+  // `ac_cli.py discover-features` yet - each zone normally carries its own
+  // modes/fanSpeeds from status (different indoor unit models on the same
+  // system can support different values; see README).
   readonly property var modes: ["COOL", "DRY", "FAN"]
   readonly property var fanSpeeds: ["AUTO", "MID1", "MID2", "HIGH"]
 
@@ -112,7 +113,9 @@ Panel {
           mode: u.mode,
           setTemp: u.set_temp,
           fanSpeed: u.fan_speed,
-          inletTemp: u.inlet_temp
+          inletTemp: u.inlet_temp,
+          modes: (u.modes && u.modes.length) ? u.modes : root.modes,
+          fanSpeeds: (u.fan_speeds && u.fan_speeds.length) ? u.fan_speeds : root.fanSpeeds
         })
       }
       next.sort(function(a, b) { return a.group - b.group })
@@ -146,14 +149,16 @@ Panel {
   }
 
   function cycleMode(zone) {
-    var idx = root.modes.indexOf(zone.mode)
-    var next = root.modes[(idx + 1) % root.modes.length]
+    var list = (zone.modes && zone.modes.length) ? zone.modes : root.modes
+    var idx = list.indexOf(zone.mode)
+    var next = list[(idx + 1) % list.length]
     enqueue(["set-mode", String(zone.group), next])
   }
 
   function cycleFan(zone) {
-    var idx = root.fanSpeeds.indexOf(zone.fanSpeed)
-    var next = root.fanSpeeds[(idx + 1) % root.fanSpeeds.length]
+    var list = (zone.fanSpeeds && zone.fanSpeeds.length) ? zone.fanSpeeds : root.fanSpeeds
+    var idx = list.indexOf(zone.fanSpeed)
+    var next = list[(idx + 1) % list.length]
     enqueue(["set-fan", String(zone.group), next])
   }
 
