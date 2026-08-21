@@ -1,4 +1,4 @@
-# mvac.ac — Omarchy AC control plugin
+# mhvac.ac — Omarchy AC control plugin
 
 Bar widget for the Omarchy shell (Quickshell) that controls a Mitsubishi
 M-NET HVAC system: per-zone status, on/off, mode, temperature, and fan
@@ -15,17 +15,17 @@ temperature reading rather than showing a stale value.
 - `ac_cli.py` — CLI wrapper around `mit.py`. The QML shells out to this for
   every read and write; it's also usable standalone from a terminal.
 - `Panel.qml` — the bar icon + popup (Quickshell/QML).
-- `manifest.json` — Omarchy plugin manifest (`id: mvac.ac`).
+- `manifest.json` — Omarchy plugin manifest (`id: mhvac.ac`).
 
 ## Deployment
 
-Omarchy's plugin loader reads from `~/.config/omarchy/plugins/mvac.ac/`,
+Omarchy's plugin loader reads from `~/.config/omarchy/plugins/mhvac.ac/`,
 and its validator (`omarchy plugin validate`) rejects symlinks inside a
 plugin folder — so that directory holds real copies, not a symlink back
 here. After editing files in this repo, redeploy with:
 
 ```bash
-cp mit.py ac_cli.py Panel.qml manifest.json ~/.config/omarchy/plugins/mvac.ac/
+cp mit.py ac_cli.py Panel.qml manifest.json ~/.config/omarchy/plugins/mhvac.ac/
 ```
 
 QML edits hot-reload automatically once copied; if changes don't seem to
@@ -98,7 +98,7 @@ only manages plugin lifecycle (list/enable/disable/validate). To run
 `ac_cli.py` commands yourself, either call it directly:
 
 ```bash
-python3 ~/.config/omarchy/plugins/mvac.ac/ac_cli.py status
+python3 ~/.config/omarchy/plugins/mhvac.ac/ac_cli.py status
 ```
 
 or use the `ac` shortcut installed at `~/.local/bin/ac` (on `PATH`), which

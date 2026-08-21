@@ -7,10 +7,10 @@ import qs.Commons
 
 Panel {
   id: root
-  moduleName: "mvac.ac"
-  ipcTarget: "mvac.ac"
+  moduleName: "mhvac.ac"
+  ipcTarget: "mhvac.ac"
 
-  readonly property string cliPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/mvac.ac/ac_cli.py"
+  readonly property string cliPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/mhvac.ac/ac_cli.py"
 
   // Fallback used only for a zone whose config hasn't been through
   // `ac_cli.py discover-features` yet - each zone normally carries its own
