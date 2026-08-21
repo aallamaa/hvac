@@ -1,4 +1,6 @@
 import signal
+import sys
+import math
 import xml.etree.ElementTree as ET
 import requests
 from dataclasses import dataclass
@@ -73,7 +75,9 @@ class HVACUnit:
         if "FanSpeed" in attrs and attrs["FanSpeed"] != "*":
             unit.fan_speed = FanSpeed(attrs["FanSpeed"])
         if "InletTemp" in attrs and attrs["InletTemp"] != "*":
-            unit.inlet_temp = float(attrs["InletTemp"])
+            inlet_temp = float(attrs["InletTemp"])
+            if math.isfinite(inlet_temp):
+                unit.inlet_temp = inlet_temp
             
         return unit
 
@@ -139,30 +143,45 @@ class MNetController:
     
     def _send_request(self, xml_data: str) -> requests.Response:
         """Send XML request to M-NET device"""
+        old_delay, _ = signal.getitimer(signal.ITIMER_REAL)
+        if old_delay > 0:
+            # ITIMER_REAL is process-global. Refuse the request instead of
+            # delaying the caller's alarm or weakening our wall-clock cap.
+            raise RuntimeError(
+                "Cannot start M-NET request while ITIMER_REAL is already in use"
+            )
+        if signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, set()):
+            raise RuntimeError(
+                "Cannot start M-NET request while SIGALRM is blocked"
+            )
+        if signal.SIGALRM in signal.sigpending():
+            raise RuntimeError(
+                "Cannot start M-NET request while SIGALRM is pending"
+            )
+
+        old_handler = signal.getsignal(signal.SIGALRM)
+        response = None
+        cleanup_error = None
+        primary_error = None
+        old_signal_mask = None
+
         def _on_alarm(signum, frame):
             raise _RequestTimedOut()
 
-        old_handler = signal.signal(signal.SIGALRM, _on_alarm)
-        signal.alarm(self.MAX_REQUEST_SECONDS)
         try:
+            signal.signal(signal.SIGALRM, _on_alarm)
+            signal.setitimer(signal.ITIMER_REAL, self.MAX_REQUEST_SECONDS, 0.0)
+
             response = requests.post(
                 self.url,
                 headers=self.headers,
                 data=xml_data,
                 timeout=self.REQUEST_TIMEOUT,
                 stream=True,
-                # This is a fixed, single-purpose client for one configured
-                # gateway; it never has a legitimate reason to redirect.
-                # Following one would (a) let a redirect's body dodge the
-                # size cap below, since requests fully reads intermediate
-                # redirect responses before this code ever sees them, and
-                # (b) let a spoofed/misconfigured gateway redirect our
-                # control payload to an arbitrary origin.
                 allow_redirects=False,
             )
             if 300 <= response.status_code < 400:
                 location = response.headers.get("Location", "<none>")
-                response.close()
                 raise ValueError(f"M-NET gateway returned unexpected redirect to {location!r}")
             response.raise_for_status()
 
@@ -171,13 +190,10 @@ class MNetController:
             for chunk in response.iter_content(chunk_size=8192):
                 total += len(chunk)
                 if total > self.MAX_RESPONSE_BYTES:
-                    response.close()
                     raise ValueError(
                         f"M-NET response exceeded {self.MAX_RESPONSE_BYTES} byte limit"
                     )
                 chunks.append(chunk)
-            # Populate the usual response.text/.content lazily-loaded cache
-            # so callers don't need to know this read happened manually.
             response._content = b"".join(chunks)
             response._content_consumed = True
 
@@ -192,11 +208,43 @@ class MNetController:
         except requests.RequestException as e:
             raise Exception(f"M-NET communication failed: {e}")
         finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
+            try:
+                primary_error = sys.exc_info()[0]
+                try:
+                    if response is not None:
+                        response.close()
+                finally:
+                    # Keep SIGALRM active through close(), then atomically
+                    # block it before restoring process-global signal state.
+                    old_signal_mask = signal.pthread_sigmask(
+                        signal.SIG_BLOCK, {signal.SIGALRM}
+                    )
+            except _RequestTimedOut:
+                if primary_error is None:
+                    cleanup_error = Exception(
+                        f"M-NET request exceeded {self.MAX_REQUEST_SECONDS}s wall-clock limit during cleanup"
+                    )
+            except Exception as e:
+                if primary_error is None:
+                    cleanup_error = Exception(f"M-NET communication failed while closing response: {e}")
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0.0, 0.0)
+                if signal.SIGALRM in signal.sigpending():
+                    signal.sigwait({signal.SIGALRM})
+                signal.signal(signal.SIGALRM, old_handler)
+                if old_signal_mask is not None:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, old_signal_mask)
+
+            if cleanup_error is not None:
+                raise cleanup_error
     
     def _parse_response(self, xml_response: str) -> List[HVACUnit]:
         """Parse XML response into HVACUnit objects"""
+        # M-NET responses have no DTD. Rejecting one prevents internal entity
+        # expansion without adding another runtime dependency.
+        if "<!DOCTYPE" in xml_response.upper():
+            raise Exception("M-NET response contains a forbidden DTD")
+
         try:
             root = ET.fromstring(xml_response)
             units = []

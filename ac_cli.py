@@ -12,13 +12,15 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mit import MNetController, Mode, FanSpeed
 
-CONFIG_FILE = os.environ.get("AC_CONFIG_FILE", os.path.expanduser("~/.config/ac-plugin/config.json"))
+DEFAULT_CONFIG_FILE = os.path.expanduser("~/.config/ac-plugin/config.json")
+CONFIG_FILE = os.environ.get("AC_CONFIG_FILE", DEFAULT_CONFIG_FILE)
 
 # Real, user-facing write targets. AUTOCOOL/AUTOHEAT are excluded on purpose:
 # per Mitsubishi's own M-NET BACnet gateway spec they're "Not settable" -
@@ -99,7 +101,12 @@ def load_config():
 
 
 def save_config(config):
-    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    config_dir = os.path.dirname(os.path.abspath(CONFIG_FILE))
+    os.makedirs(config_dir, mode=0o700, exist_ok=True)
+    if os.path.abspath(CONFIG_FILE) == os.path.abspath(DEFAULT_CONFIG_FILE):
+        # Tighten directories created by older versions without changing an
+        # arbitrary parent directory selected through AC_CONFIG_FILE.
+        os.chmod(config_dir, 0o700)
     zones_out = {
         g: {"name": z["name"], "modes": z["modes"], "fan_speeds": z["fan_speeds"]}
         for g, z in config["zones"].items()
@@ -110,9 +117,31 @@ def save_config(config):
         "icon_temp": config.get("icon_temp", "avg"),
         "zones": dict(sorted(zones_out.items(), key=lambda kv: int(kv[0]))),
     }
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(to_write, f, indent=2)
-        f.write("\n")
+    fd, temp_path = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=config_dir)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            fd = None
+            json.dump(to_write, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, CONFIG_FILE)
+        temp_path = None
+        os.chmod(CONFIG_FILE, 0o600)
+        directory_fd = os.open(config_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
     return to_write
 
 
@@ -171,35 +200,61 @@ def discover_features(config, groups):
     for g in groups:
         original = ctrl.get_unit_status(g)
         was_on = original.drive is not None and original.drive.value == "ON"
-        if was_on:
-            ctrl.turn_off(g)
-            time.sleep(FEATURE_TEST_DELAY)
-
         supported_modes = []
-        for m in ALL_MODES:
-            ctrl.set_mode(g, Mode(m))
-            time.sleep(FEATURE_TEST_DELAY)
-            check = ctrl.get_unit_status(g)
-            if check.mode is not None and check.mode.value == m:
-                supported_modes.append(m)
-
-        if original.mode is not None:
-            ctrl.set_mode(g, original.mode)
-
         supported_fans = []
-        for speed in ALL_FAN_SPEEDS:
-            ctrl.set_fan_speed(g, FanSpeed(speed))
-            time.sleep(FEATURE_TEST_DELAY)
-            check = ctrl.get_unit_status(g)
-            if check.fan_speed is not None and check.fan_speed.value == speed:
-                supported_fans.append(speed)
+        probe_error = None
+        restore_errors = []
+        try:
+            if was_on:
+                ctrl.turn_off(g)
+                time.sleep(FEATURE_TEST_DELAY)
 
-        if original.fan_speed is not None:
-            ctrl.set_fan_speed(g, original.fan_speed)
-        if original.set_temp is not None:
-            ctrl.set_temperature(g, original.set_temp)
-        if was_on:
-            ctrl.turn_on(g)
+            for m in ALL_MODES:
+                ctrl.set_mode(g, Mode(m))
+                time.sleep(FEATURE_TEST_DELAY)
+                check = ctrl.get_unit_status(g)
+                if check.mode is not None and check.mode.value == m:
+                    supported_modes.append(m)
+
+            for speed in ALL_FAN_SPEEDS:
+                ctrl.set_fan_speed(g, FanSpeed(speed))
+                time.sleep(FEATURE_TEST_DELAY)
+                check = ctrl.get_unit_status(g)
+                if check.fan_speed is not None and check.fan_speed.value == speed:
+                    supported_fans.append(speed)
+        except BaseException as e:
+            probe_error = e
+        finally:
+            restore_steps = []
+            if original.mode is not None:
+                restore_steps.append(("mode", lambda: ctrl.set_mode(g, original.mode)))
+            if original.fan_speed is not None:
+                restore_steps.append(("fan speed", lambda: ctrl.set_fan_speed(g, original.fan_speed)))
+            if original.set_temp is not None:
+                restore_steps.append(("temperature", lambda: ctrl.set_temperature(g, original.set_temp)))
+            if original.drive is not None:
+                restore_power = ctrl.turn_on if was_on else ctrl.turn_off
+                restore_steps.append(("power", lambda: restore_power(g)))
+
+            for label, restore in restore_steps:
+                try:
+                    restore()
+                except Exception as e:
+                    restore_errors.append(f"{label}: {e}")
+
+        if probe_error is not None:
+            if restore_errors:
+                restoration_note = "State restoration also failed: " + "; ".join(restore_errors)
+                combined_message = f"{probe_error}. {restoration_note}"
+                if isinstance(probe_error, Exception):
+                    raise RuntimeError(combined_message) from probe_error
+                else:
+                    # Preserve KeyboardInterrupt/SystemExit semantics while
+                    # still making restoration failures visible to the CLI.
+                    probe_error.args = (combined_message,)
+            raise probe_error
+        if restore_errors:
+            raise RuntimeError("Failed to restore zone {} state: {}".format(g, "; ".join(restore_errors)))
 
         key = str(g)
         zone_cfg = config["zones"].get(key) or normalize_zone("Zone {}".format(g), g)

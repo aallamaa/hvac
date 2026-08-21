@@ -22,6 +22,10 @@ temperature reading rather than showing a stale value.
 
 No elevated privileges are needed — everything runs as your normal user.
 
+The M-NET HTTP/XML gateway protocol provides no authentication or
+encryption. This plugin assumes the gateway is reachable only over a trusted
+LAN; do not expose it directly to untrusted networks or the public internet.
+
 ## Install
 
 ```bash
