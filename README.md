@@ -46,15 +46,20 @@ Click the snowflake icon in the bar to open the popup. Each zone shows:
 - the current room temperature
 - a mode button (cycles through that zone's supported modes)
 - a fan-speed button (cycles through that zone's supported speeds)
+- an air-direction button when the indoor unit reports vane control support
 - a −/+ temperature stepper
+
+An active filter-cleaning reminder adds `[FILTER]` to the zone name. Active
+faults add `[FAULT]` in the urgent color; use `ac alarms` for the controller's
+detailed M-NET address, numeric alarm code, model, and detection time.
 
 "All On"/"All Off" at the top act on every configured zone. The "AVG: N°"
 button next to them cycles the bar icon's own temperature display through
 `avg`/`min`/`max`/`off` (see Configure).
 
-The bar icon itself shows the icon-only when nothing's on, an aggregate
-temperature reading otherwise, and turns the theme's urgent/red color if
-the gateway can't be reached.
+The bar icon itself shows an aggregate temperature reading whenever sensor
+data is available (regardless of whether a zone is on), and turns the theme's
+urgent/red color if the gateway can't be reached.
 
 ## Configure
 
@@ -67,14 +72,14 @@ Gateway host/port, zone names, and per-zone capabilities live in
   "port": 80,
   "icon_temp": "avg",
   "zones": {
-    "1": { "name": "Living room", "modes": ["COOL", "DRY", "FAN"], "fan_speeds": ["AUTO", "MID1", "MID2", "HIGH"] },
-    "6": { "name": "Office", "modes": ["COOL", "HEAT", "DRY", "FAN"], "fan_speeds": ["LOW", "MID1", "MID2", "HIGH"] }
+    "1": { "name": "Living room", "modes": ["COOL", "DRY", "FAN"], "fan_speeds": ["AUTO", "MID1", "MID2", "HIGH"], "air_directions": [] },
+    "6": { "name": "Office", "modes": ["COOL", "HEAT", "DRY", "FAN"], "fan_speeds": ["LOW", "MID1", "MID2", "HIGH"], "air_directions": ["HORIZONTAL", "MID1", "MID2", "VERTICAL"] }
   }
 }
 ```
 
 `icon_temp` controls what number the bar icon shows next to the snowflake
-for the zones that are currently on (icon-only when everything's off):
+across available zone temperature readings:
 `avg` (default), `min`, `max`, or `off`. It's also editable straight from
 the popup — the "AVG: N°" button in the header cycles through the four
 values.
@@ -85,46 +90,41 @@ where they come from. A zone can also be given as a plain name string
 (`"1": "Living room"`); it's upgraded on load to the full shape above,
 filled in with not-yet-discovered defaults.
 
-If this file is missing, `ac_cli.py` falls back to built-in defaults
-(`192.168.1.2`, zones 1–6 named "Zone N") so the plugin still works out of
-the box on first install — you'll want to point it at your own gateway
-and zones, though. `AC_CONFIG_FILE` overrides the path; `AC_HOST` /
-`AC_PORT` env vars override the host/port from the file for one-off use.
+If this file (or its `zones` key) is missing, the first `status` call reads the
+gateway's configured group inventory and names in one request. On firmware
+without that API it falls back to probing the 50 possible group slots. It
+never assumes zones 1–6. An explicit `"zones": {}` is
+authoritative and means “query and control no groups.” Invalid or unreadable
+configuration fails closed instead of restoring built-in control targets.
+The initial gateway default is `192.168.1.2`; use `set-host` or `AC_HOST` /
+`AC_PORT` to point discovery elsewhere. `AC_CONFIG_FILE` overrides the path.
 
 ### Finding your zones
 
 ```bash
-ac discover --max 16   # probe groups 1..16, report which respond
-ac zones-init          # same, then add any newly-found groups to the config
+ac discover            # read the group inventory (with probe fallback)
+ac zones-init          # same, then add groups and gateway-configured names
 ac rename 3 "Kids room"
 ac set-host 192.168.1.50
 ```
 
 ### Per-zone capability discovery
 
-Different indoor unit models on the same M-NET system can support
-different modes and fan speeds — on this installation, one zone (a
-heat-pump unit) supports `HEAT` and `LOW` fan speed while the rest
-(cooling-only units) reject both. Rather than guess, `discover-features`
-finds out empirically per zone: for each candidate mode/fan speed, it
-writes the value and reads status back to see whether it actually took —
-one that's silently rejected reads back unchanged.
+Different indoor unit models on the same M-NET system can support different
+modes and fan speeds. `discover-features` reads the gateway's capability flags
+(`IcKind`, mode switches, fan-stage count, and automatic-fan support) and saves
+the resulting per-zone choices. It is entirely read-only and does not turn off
+or change any HVAC unit.
 
 ```bash
 ac discover-features        # every configured zone
 ac discover-features 6      # just zone/group 6
 ```
 
-For each zone this temporarily turns it off (a setting is easier to tell
-apart from "didn't take" when the compressor isn't also reacting), steps
-through `COOL`/`HEAT`/`DRY`/`FAN`/`AUTO` and `AUTO`/`LOW`/`MID1`/`MID2`/`HIGH`,
-then restores its original mode, fan speed, set temperature, and on/off
-state before moving to the next zone. `AUTOCOOL`/`AUTOHEAT` aren't tested —
-per Mitsubishi's own M-NET gateway spec they're read-only status values a
-unit reports while running under `AUTO`, never something you write. Each
-zone's results are saved to the config as soon as that zone finishes, so
-an interruption doesn't lose earlier zones' results. It takes a few
-seconds per zone.
+`AUTOCOOL`/`AUTOHEAT` remain display-only statuses: Mitsubishi integration
+documentation marks them as not applicable for setting, so the plugin never
+writes them. Capability results also report air-direction, swing, filter-sign,
+and error-sign availability in the CLI output.
 
 ## Remove
 
@@ -188,16 +188,18 @@ on failure it prints `{"error": "..."}` to stderr and exits 1.
 |---|---|---|
 | `status` | | Status of every configured zone (drive, mode, set temp, fan speed, inlet temp). |
 | `config` | | Print the resolved config (host, port, zones). |
+| `alarms` | | List active detailed controller alarms. Read-only. |
 | `on` | `<group>` | Turn a zone on. |
 | `off` | `<group>` | Turn a zone off. |
 | `set-temp` | `<group> <temp>` | Set target temperature (16–30). |
 | `set-fan` | `<group> <speed>` | Set fan speed: `AUTO`, `LOW`, `MID1`, `MID2`, or `HIGH`. Not every zone accepts every value — see "Per-zone capability discovery". |
 | `set-mode` | `<group> <mode>` | Set mode: `COOL`, `HEAT`, `DRY`, `FAN`, or `AUTO`. Not every zone accepts every value — see "Per-zone capability discovery". |
-| `all-on` | | Turn on every configured zone. |
-| `all-off` | | Turn off every configured zone. |
-| `discover` | `[--max N]` | Probe groups `1..N` (default 16) one at a time and report which respond. Doesn't touch the config. |
-| `zones-init` | `[--max N]` | Run `discover`, then add any newly-found groups to the config as "Zone N" — existing names are kept. |
-| `discover-features` | `[group]` | Probe which modes/fan speeds a zone (or every zone, if omitted) actually accepts and save them to the config. |
+| `set-air` | `<group> <direction>` | Set a capability-discovered vane position such as `HORIZONTAL`, `MID1`, `MID2`, `VERTICAL`, or `SWING`. |
+| `all-on` | | Attempt to turn on every configured zone and report each result. |
+| `all-off` | | Attempt to turn off every configured zone and report each result. |
+| `discover` | `[--max N]` | Read configured groups from the inventory API, falling back to probes when unsupported. Doesn't touch the config. |
+| `zones-init` | `[--max N]` | Run discovery and add new groups using controller-configured names when available; existing names are kept. |
+| `discover-features` | `[group]` | Read mode/fan capability flags for a zone (or every configured zone) and save them. Does not change HVAC state. |
 | `rename` | `<group> <name>` | Set a zone's display name in the config. |
 | `set-host` | `<host> [port]` | Set the gateway host/port in the config (default port 80). |
 | `set-icon-temp` | `<mode>` | Set the bar icon's temperature display: `avg`, `min`, `max`, or `off`. |
@@ -221,3 +223,14 @@ ac set-host 192.168.1.2
 ## License
 
 GPL-3.0-or-later — see [LICENSE](LICENSE).
+
+## Protocol references
+
+Mitsubishi does not appear to publish a public specification for the
+`MIMEReceiveServlet` XML wire format. The closest vendor documentation found
+is Mitsubishi Electric's [G-50A operation manual](https://mitsubishitech.co.uk/Data/Controls/Centralised_Controllers/2008/G-50A/G50A_OM.pdf)
+and its [IP integration instructions](https://librairie.mitsubishielectric.fr/pdf/download_full/2511),
+which document 50 groups and identify Auto Cool/Auto Heat as non-settable
+statuses. The HTTP/XML packet details and one-group-at-a-time discovery are
+based on observed gateway behavior and independently reverse-engineered
+clients, not an official public wire-protocol specification.

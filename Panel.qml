@@ -12,17 +12,6 @@ Panel {
 
   readonly property string cliPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/mhvac.ac/ac_cli.py"
 
-  // Neutralizes rich-text markup before a string reaches any Text/tooltip
-  // sink. Zone names are user-configurable (`ac rename`), and error text
-  // ultimately originates from whatever host is configured as the gateway -
-  // an attacker who can respond on that host/port (e.g. a spoofed device on
-  // the LAN, or a mistyped `set-host`) could otherwise embed markup into an
-  // HTTP reason phrase and have it rendered as rich text.
-  function sanitizeText(s) {
-    if (typeof s !== "string") return s
-    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-  }
-
   // ac_cli.py prints {"error": "..."} to stderr on failure; pull out just
   // the message instead of showing the raw JSON blob.
   function extractErrorMessage(raw) {
@@ -46,7 +35,9 @@ Panel {
 
   property var zones: []
   property string lastError: ""
+  property string actionError: ""
   property bool unreachable: false
+  property bool statusLoaded: false
   property var pendingQueue: []
 
   readonly property var iconTempModes: ["avg", "min", "max", "off"]
@@ -93,7 +84,7 @@ Panel {
 
   function modeColor(mode) {
     if (mode === "COOL" || mode === "AUTOCOOL") return root.coolColor
-    if (mode === "HEAT") return root.heatColor
+    if (mode === "HEAT" || mode === "AUTOHEAT") return root.heatColor
     if (mode === "DRY") return root.dryColor
     if (mode === "FAN") return root.fanModeColor
     if (mode === "AUTO") return root.autoColor
@@ -128,25 +119,33 @@ Panel {
   function updateZones(raw) {
     try {
       var data = JSON.parse(raw)
+      if (!Array.isArray(data)) {
+        throw new Error("Expected array of zones")
+      }
       var next = []
       for (var i = 0; i < data.length; i++) {
         var u = data[i]
         next.push({
           group: u.group,
-          name: root.sanitizeText(u.name) || ("Zone " + u.group),
+          name: String(u.name || ("Zone " + u.group)),
           drive: u.drive,
           mode: u.mode,
           setTemp: u.set_temp,
           fanSpeed: u.fan_speed,
+          airDirection: u.air_direction,
           inletTemp: u.inlet_temp,
-          modes: (u.modes && u.modes.length) ? u.modes : root.modes,
-          fanSpeeds: (u.fan_speeds && u.fan_speeds.length) ? u.fan_speeds : root.fanSpeeds
+          filterSign: u.filter_sign,
+          errorSign: u.error_sign,
+          modes: Array.isArray(u.modes) ? u.modes : root.modes,
+          fanSpeeds: Array.isArray(u.fan_speeds) ? u.fan_speeds : root.fanSpeeds,
+          airDirections: Array.isArray(u.air_directions) ? u.air_directions : []
         })
       }
       next.sort(function(a, b) { return a.group - b.group })
       root.zones = next
       root.lastError = ""
       root.unreachable = false
+      root.statusLoaded = true
     } catch (e) {
       root.lastError = "Bad status response"
       root.unreachable = true
@@ -161,7 +160,7 @@ Panel {
   function drainQueue() {
     if (actionProc.running) return
     if (pendingQueue.length === 0) return
-    actionProc.command = ["/usr/bin/python3", root.cliPath].concat(pendingQueue.shift())
+    actionProc.command = ["python3", root.cliPath].concat(pendingQueue.shift())
     actionProc.running = true
   }
 
@@ -174,17 +173,37 @@ Panel {
   }
 
   function cycleMode(zone) {
-    var list = (zone.modes && zone.modes.length) ? zone.modes : root.modes
+    var list = Array.isArray(zone.modes) ? zone.modes : root.modes
+    if (list.length === 0) return
     var idx = list.indexOf(zone.mode)
     var next = list[(idx + 1) % list.length]
     enqueue(["set-mode", String(zone.group), next])
   }
 
   function cycleFan(zone) {
-    var list = (zone.fanSpeeds && zone.fanSpeeds.length) ? zone.fanSpeeds : root.fanSpeeds
+    var list = Array.isArray(zone.fanSpeeds) ? zone.fanSpeeds : root.fanSpeeds
+    if (list.length === 0) return
     var idx = list.indexOf(zone.fanSpeed)
     var next = list[(idx + 1) % list.length]
     enqueue(["set-fan", String(zone.group), next])
+  }
+
+  function cycleAirDirection(zone) {
+    var list = zone.airDirections || []
+    if (list.length === 0) return
+    var idx = list.indexOf(zone.airDirection)
+    var next = list[(idx + 1) % list.length]
+    enqueue(["set-air", String(zone.group), next])
+  }
+
+  function airDirectionLabel(direction) {
+    if (direction === "HORIZONTAL") return "AIR ↔"
+    if (direction === "VERTICAL") return "AIR ↕"
+    if (direction === "SWING") return "AIR ↕↔"
+    if (direction === "MID0") return "AIR 0"
+    if (direction === "MID1") return "AIR 1"
+    if (direction === "MID2") return "AIR 2"
+    return "AIR"
   }
 
   function adjustTemp(zone, delta) {
@@ -207,7 +226,7 @@ Panel {
 
   Process {
     id: statusProc
-    command: ["/usr/bin/python3", root.cliPath, "status"]
+    command: ["python3", root.cliPath, "status"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.updateZones(text)
@@ -226,7 +245,7 @@ Panel {
 
   Process {
     id: configProc
-    command: ["/usr/bin/python3", root.cliPath, "config"]
+    command: ["python3", root.cliPath, "config"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.updateConfig(text)
@@ -242,7 +261,9 @@ Panel {
     onExited: function(exitCode) {
       if (exitCode !== 0) {
         var msg = root.extractErrorMessage(actionErrText.text)
-        root.lastError = root.sanitizeText(msg !== "" ? msg : "Action failed")
+        root.actionError = msg !== "" ? msg : "Action failed"
+      } else {
+        root.actionError = ""
       }
       root.refresh()
       root.refreshConfig()
@@ -363,8 +384,8 @@ Panel {
 
         Text {
           textFormat: Text.PlainText
-          visible: root.lastError !== ""
-          text: root.lastError
+          visible: root.actionError !== "" || root.lastError !== ""
+          text: root.actionError || root.lastError
           color: root.bar.urgent
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.caption
@@ -386,8 +407,8 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            visible: root.zones.length === 0 && root.lastError === ""
-            text: "Loading…"
+            visible: root.zones.length === 0 && root.lastError === "" && root.actionError === ""
+            text: root.statusLoaded ? "No zones configured" : "Loading…"
             color: root.bar.foreground
             opacity: 0.6
             font.family: root.bar.fontFamily
@@ -427,7 +448,11 @@ Panel {
         textFormat: Text.PlainText
         id: zoneName
         text: zoneRow.zone.name
-        color: root.bar.foreground
+          + (zoneRow.zone.filterSign === "ON" ? "  [FILTER]" : "")
+          + (zoneRow.zone.errorSign !== null && zoneRow.zone.errorSign !== undefined
+             && zoneRow.zone.errorSign !== "OFF" ? "  [FAULT]" : "")
+        color: zoneRow.zone.errorSign !== null && zoneRow.zone.errorSign !== undefined
+          && zoneRow.zone.errorSign !== "OFF" ? root.bar.urgent : root.bar.foreground
         font.family: root.bar.fontFamily
         font.pixelSize: Style.font.bodySmall
         font.bold: true
@@ -463,6 +488,7 @@ Panel {
 
         Button {
           id: modeBtn
+          visible: zoneRow.zone.modes && zoneRow.zone.modes.length > 0
           text: zoneRow.zone.mode || "—"
           fontSize: Style.font.caption
           horizontalPadding: Style.space(6)
@@ -474,6 +500,7 @@ Panel {
         }
 
         Button {
+          visible: zoneRow.zone.fanSpeeds && zoneRow.zone.fanSpeeds.length > 0
           text: zoneRow.zone.fanSpeed || "—"
           fontSize: Style.font.caption
           horizontalPadding: Style.space(6)
@@ -482,6 +509,19 @@ Panel {
           fontFamily: root.bar.fontFamily
           bordered: true
           onClicked: root.cycleFan(zoneRow.zone)
+        }
+
+        Button {
+          visible: zoneRow.zone.airDirections && zoneRow.zone.airDirections.length > 0
+          text: root.airDirectionLabel(zoneRow.zone.airDirection)
+          tooltipText: "Air direction: " + (zoneRow.zone.airDirection || "unknown")
+          fontSize: Style.font.caption
+          horizontalPadding: Style.space(6)
+          verticalPadding: Style.space(2)
+          foreground: zoneRow.zone.drive === "ON" ? root.bar.foreground : Color.muted
+          fontFamily: root.bar.fontFamily
+          bordered: true
+          onClicked: root.cycleAirDirection(zoneRow.zone)
         }
       }
 

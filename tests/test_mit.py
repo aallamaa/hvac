@@ -9,6 +9,7 @@ from unittest import mock
 import requests
 
 from mit import (
+    AirDirection,
     MNetController,
     HVACUnit,
     DriveState,
@@ -289,6 +290,50 @@ class TestMNetControllerSendRequest(unittest.TestCase):
 
 
 class TestHVACUnitParsing(unittest.TestCase):
+    def test_auto_direction_statuses_are_supported(self):
+        self.assertEqual(
+            HVACUnit.from_mnet_attrs({"Group": "1", "Mode": "AUTOCOOL"}).mode,
+            Mode.AUTOCOOL,
+        )
+        self.assertEqual(
+            HVACUnit.from_mnet_attrs({"Group": "1", "Mode": "AUTOHEAT"}).mode,
+            Mode.AUTOHEAT,
+        )
+
+    def test_unknown_or_malformed_optional_fields_are_ignored(self):
+        unit = HVACUnit.from_mnet_attrs({
+            "Group": "1", "Drive": "BROKEN", "Mode": "FUTURE_MODE",
+            "SetTemp": "--", "FanSpeed": "TURBO", "InletTemp": "--",
+        })
+        self.assertIsNone(unit.drive)
+        self.assertIsNone(unit.mode)
+        self.assertIsNone(unit.set_temp)
+        self.assertIsNone(unit.fan_speed)
+        self.assertIsNone(unit.inlet_temp)
+
+    def test_air_direction_filter_and_fault_status_are_parsed(self):
+        unit = HVACUnit.from_mnet_attrs({
+            "Group": "6", "AirDirection": "HORIZONTAL",
+            "FilterSign": "ON", "ErrorSign": "OFF",
+        })
+        self.assertEqual(unit.air_direction, AirDirection.HORIZONTAL)
+        self.assertEqual(unit.filter_sign, "ON")
+        self.assertEqual(unit.error_sign, "OFF")
+
+    def test_one_malformed_group_does_not_discard_valid_group(self):
+        xml = """<Packet><DatabaseManager>
+            <Mnet Group="bad" Drive="ON"/>
+            <Mnet Group="2" Drive="OFF" Mode="AUTOHEAT" SetTemp="22.0"/>
+        </DatabaseManager></Packet>"""
+        units = MNetController()._parse_response(xml)
+        self.assertEqual([unit.group for unit in units], [2])
+        self.assertEqual(units[0].mode, Mode.AUTOHEAT)
+        self.assertEqual(units[0].set_temp, 22)
+
+    def test_all_wildcard_group_is_treated_as_unconfigured(self):
+        xml = '<Packet><DatabaseManager><Mnet Group="7" Drive="*" Mode="*"/></DatabaseManager></Packet>'
+        self.assertEqual(MNetController()._parse_response(xml), [])
+
     def test_non_finite_inlet_temperatures_are_treated_as_missing(self):
         for value in ("nan", "inf", "-inf", "NaN", "Infinity"):
             with self.subTest(value=value):
@@ -316,6 +361,183 @@ class TestHVACUnitParsing(unittest.TestCase):
 
         with self.assertRaisesRegex(Exception, "forbidden DTD"):
             MNetController()._parse_response(xml)
+
+
+class TestControlConfirmation(unittest.TestCase):
+    def setUp(self):
+        self.ctrl = MNetController()
+
+    def test_read_only_auto_direction_is_rejected_before_network(self):
+        for mode in (Mode.AUTOCOOL, Mode.AUTOHEAT):
+            with self.subTest(mode=mode), mock.patch.object(self.ctrl, "_send_request") as send:
+                with self.assertRaisesRegex(ValueError, "read-only"):
+                    self.ctrl.set_mode(1, mode)
+                send.assert_not_called()
+
+    def test_confirmation_requires_same_group_and_expected_value(self):
+        valid = """<Packet><Command>setResponse</Command><DatabaseManager>
+            <Mnet Group="2" SetTemp="22"/>
+        </DatabaseManager></Packet>"""
+        wrong_group = valid.replace('Group="2"', 'Group="3"')
+        wrong_value = valid.replace('SetTemp="22"', 'SetTemp="23"')
+        self.assertTrue(self.ctrl._set_confirmed(valid, 2, SetTemp="22"))
+        self.assertFalse(self.ctrl._set_confirmed(wrong_group, 2, SetTemp="22"))
+        self.assertFalse(self.ctrl._set_confirmed(wrong_value, 2, SetTemp="22"))
+
+    def test_numeric_temperature_confirmation(self):
+        valid_integer = """<Packet><Command>setResponse</Command><DatabaseManager>
+            <Mnet Group="2" SetTemp="22"/>
+        </DatabaseManager></Packet>"""
+        valid_float = """<Packet><Command>setResponse</Command><DatabaseManager>
+            <Mnet Group="2" SetTemp="22.0"/>
+        </DatabaseManager></Packet>"""
+        valid_extra_decimal = """<Packet><Command>setResponse</Command><DatabaseManager>
+            <Mnet Group="2" SetTemp="22.00"/>
+        </DatabaseManager></Packet>"""
+
+        # Equivalent numeric representations confirm
+        self.assertTrue(self.ctrl._set_confirmed(valid_integer, 2, SetTemp="22"))
+        self.assertTrue(self.ctrl._set_confirmed(valid_float, 2, SetTemp="22"))
+        self.assertTrue(self.ctrl._set_confirmed(valid_integer, 2, SetTemp="22.0"))
+        self.assertTrue(self.ctrl._set_confirmed(valid_float, 2, SetTemp="22.0"))
+        self.assertTrue(self.ctrl._set_confirmed(valid_extra_decimal, 2, SetTemp="22"))
+
+        # Different values fail
+        different = """<Packet><Command>setResponse</Command><DatabaseManager>
+            <Mnet Group="2" SetTemp="23"/>
+        </DatabaseManager></Packet>"""
+        self.assertFalse(self.ctrl._set_confirmed(different, 2, SetTemp="22"))
+
+        # Non-finite and malformed values fail
+        for malformed in ("nan", "inf", "-inf", "NaN", "Infinity", "invalid", "", "--"):
+            with self.subTest(malformed=malformed):
+                xml = f"""<Packet><Command>setResponse</Command><DatabaseManager>
+                    <Mnet Group="2" SetTemp="{malformed}"/>
+                </DatabaseManager></Packet>"""
+                self.assertFalse(self.ctrl._set_confirmed(xml, 2, SetTemp="22"))
+                self.assertFalse(self.ctrl._set_confirmed(valid_integer, 2, SetTemp=malformed))
+
+        # Missing attribute fails
+        missing_attr = """<Packet><Command>setResponse</Command><DatabaseManager>
+            <Mnet Group="2" Drive="ON"/>
+        </DatabaseManager></Packet>"""
+        self.assertFalse(self.ctrl._set_confirmed(missing_attr, 2, SetTemp="22"))
+
+    def test_non_temperature_attributes_require_exact_match(self):
+        xml = """<Packet><Command>setResponse</Command><DatabaseManager>
+            <Mnet Group="2" Drive="ON" Mode="COOL" FanSpeed="HIGH" AirDirection="HORIZONTAL"/>
+        </DatabaseManager></Packet>"""
+        self.assertTrue(self.ctrl._set_confirmed(xml, 2, Drive="ON", Mode="COOL"))
+        self.assertFalse(self.ctrl._set_confirmed(xml, 2, Drive="OFF"))
+        self.assertFalse(self.ctrl._set_confirmed(xml, 2, Mode="HEAT"))
+        self.assertFalse(self.ctrl._set_confirmed(xml, 2, FanSpeed="LOW"))
+        self.assertFalse(self.ctrl._set_confirmed(xml, 2, AirDirection="VERTICAL"))
+
+    def test_empty_status_does_not_make_network_request(self):
+        with mock.patch.object(self.ctrl, "_send_request") as send:
+            self.assertEqual(self.ctrl.get_status([]), [])
+        send.assert_not_called()
+
+    def test_set_air_direction_requires_matching_confirmation(self):
+        response = mock.Mock(text="""<Packet><Command>setResponse</Command>
+            <DatabaseManager><Mnet Group="6" AirDirection="MID1"/></DatabaseManager>
+            </Packet>""")
+        with mock.patch.object(self.ctrl, "_send_request", return_value=response):
+            self.assertTrue(self.ctrl.set_air_direction(6, AirDirection.MID1))
+
+
+class TestDiscoveryApis(unittest.TestCase):
+    def setUp(self):
+        self.ctrl = MNetController()
+
+    def test_group_inventory_combines_registration_and_names(self):
+        response = mock.Mock(text="""<Packet><Command>getResponse</Command>
+            <DatabaseManager><ControlGroup>
+              <MnetGroupList>
+                <MnetGroupRecord Group="2" Model="IC" SubModel="" Address="12"/>
+                <MnetGroupRecord Group="bad" Model="IC"/>
+              </MnetGroupList>
+              <MnetList><MnetRecord Group="2" GroupNameWeb="Kitchen"/></MnetList>
+            </ControlGroup></DatabaseManager></Packet>""")
+        with mock.patch.object(self.ctrl, "_send_request", return_value=response) as send:
+            inventory = self.ctrl.get_group_inventory()
+
+        self.assertEqual(inventory, {2: {
+            "name": "Kitchen", "model": "IC", "submodel": "", "address": "12"
+        }})
+        request = send.call_args.args[0]
+        self.assertIn("<MnetGroupList/>", request)
+        self.assertIn("<MnetList/>", request)
+
+    def test_get_group_models_queries_and_parses_valid_records(self):
+        response = mock.Mock(text="""<Packet><Command>getResponse</Command>
+            <DatabaseManager>
+              <Mnet Group="1" Model="IC"/>
+              <Mnet Group="6" Model="IC"/>
+              <Mnet Group="7" Model="*"/>
+              <Mnet Group="bad" Model="IC"/>
+              <Mnet Group="10" Model="OC"/>
+            </DatabaseManager></Packet>""")
+        with mock.patch.object(self.ctrl, "_send_request", return_value=response) as send:
+            models = self.ctrl.get_group_models([1, 6, 7])
+
+        self.assertEqual(models, {1: "IC", 6: "IC"})
+        request = send.call_args.args[0]
+        self.assertIn("getRequest", request)
+        self.assertNotIn("setRequest", request)
+        self.assertIn('Group="1"', request)
+        self.assertIn('Group="6"', request)
+        self.assertIn('Group="7"', request)
+        self.assertIn('Model="*"', request)
+
+    def test_get_group_models_empty_and_validation(self):
+        with mock.patch.object(self.ctrl, "_send_request") as send:
+            self.assertEqual(self.ctrl.get_group_models([]), {})
+        send.assert_not_called()
+
+        for invalid in (0, 51, -1, "1", True, None):
+            with self.subTest(invalid=invalid), mock.patch.object(self.ctrl, "_send_request") as send:
+                with self.assertRaises(ValueError):
+                    self.ctrl.get_group_models([invalid])
+                send.assert_not_called()
+
+    def test_get_group_models_rejects_dtd(self):
+        response = mock.Mock(text="""<!DOCTYPE Packet [<!ENTITY x "y">]>
+            <Packet><DatabaseManager><Mnet Group="1" Model="IC"/></DatabaseManager></Packet>""")
+        with mock.patch.object(self.ctrl, "_send_request", return_value=response):
+            with self.assertRaisesRegex(Exception, "forbidden DTD"):
+                self.ctrl.get_group_models([1])
+
+    def test_capability_query_is_read_only_and_parses_each_group(self):
+        response = mock.Mock(text="""<Packet><Command>getResponse</Command>
+            <DatabaseManager>
+              <Mnet Group="1" Model="IC" IcKind="COOL" FanSpeedSW="3STAGES"/>
+              <Mnet Group="6" Model="IC" IcKind="NORMAL" FanSpeedSW="4STAGES"/>
+            </DatabaseManager></Packet>""")
+        with mock.patch.object(self.ctrl, "_send_request", return_value=response) as send:
+            capabilities = self.ctrl.get_capabilities([1, 6])
+
+        self.assertEqual(capabilities[1]["Model"], "IC")
+        self.assertEqual(capabilities[1]["IcKind"], "COOL")
+        self.assertEqual(capabilities[6]["Model"], "IC")
+        self.assertEqual(capabilities[6]["FanSpeedSW"], "4STAGES")
+        request = send.call_args.args[0]
+        self.assertIn("getRequest", request)
+        self.assertNotIn("setRequest", request)
+        self.assertIn('Model="*"', request)
+        self.assertIn('IcKind="*"', request)
+
+    def test_active_alarm_records_are_parsed(self):
+        response = mock.Mock(text="""<Packet><Command>getResponse</Command>
+          <DatabaseManager><Mnet><AlarmStatusList>
+            <AlarmStatusRecord Address="51" Group="6" Model="OC"
+              AlarmCode="1300" Detect="2026-08-22 12:00"/>
+          </AlarmStatusList></Mnet></DatabaseManager></Packet>""")
+        with mock.patch.object(self.ctrl, "_send_request", return_value=response):
+            alarms = self.ctrl.get_alarm_status()
+        self.assertEqual(alarms[0]["address"], 51)
+        self.assertEqual(alarms[0]["group"], 6)
+        self.assertEqual(alarms[0]["alarm_code"], "1300")
 
 
 class TestSignalAndAlarmPreservation(unittest.TestCase):
