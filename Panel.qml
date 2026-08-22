@@ -42,7 +42,7 @@ Panel {
   property var pendingQueue: []
   readonly property bool hvacControlsEnabled: root.statusLoaded
     && !root.unreachable
-    && !statusProc.running
+    && !root.setupRequired
     && !actionProc.running
     && root.pendingQueue.length === 0
 
@@ -421,7 +421,7 @@ Panel {
 
           Button {
             visible: root.setupRequired && root.zones.length === 0
-            enabled: !statusProc.running && !actionProc.running && root.pendingQueue.length === 0
+            enabled: !actionProc.running && root.pendingQueue.length === 0
             opacity: enabled ? 1.0 : 0.45
             text: "Discover zones"
             tooltipText: "Discover zones and create the AC configuration"
