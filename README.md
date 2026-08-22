@@ -49,9 +49,10 @@ Click the snowflake icon in the bar to open the popup. Each zone shows:
 - an air-direction button when the indoor unit reports vane control support
 - a −/+ temperature stepper
 
-An active filter-cleaning reminder adds `[FILTER]` to the zone name. Active
-faults add `[FAULT]` in the urgent color; use `ac alarms` for the controller's
-detailed M-NET address, numeric alarm code, model, and detection time.
+An active filter-cleaning reminder shows the `󰵃` filter icon in the urgent
+color; hover it to see `Filter ON`. Active faults add `[FAULT]` in the urgent
+color; use `ac alarms` for the controller's detailed M-NET address, numeric
+alarm code, model, and detection time.
 
 "All On"/"All Off" at the top act on every configured zone. The "AVG: N°"
 button next to them cycles the bar icon's own temperature display through

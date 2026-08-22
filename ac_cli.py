@@ -11,6 +11,7 @@ change without touching this script or the QML. See CONFIG_FILE below.
 import argparse
 import json
 import os
+import shutil
 import sys
 import tempfile
 
@@ -147,6 +148,20 @@ def save_config(config):
         # Tighten directories created by older versions without changing an
         # arbitrary parent directory selected through AC_CONFIG_FILE.
         os.chmod(config_dir, 0o700)
+
+    # Keep one generation of history: copy whatever is currently on disk to
+    # <config>.backup before it gets overwritten, so a bad write - this
+    # script writing unexpected data, a bug, a corrupted file - can be
+    # recovered from with a plain `cp`. Best-effort: a backup failure must
+    # never block the actual save.
+    if os.path.exists(CONFIG_FILE):
+        backup_path = CONFIG_FILE + ".backup"
+        try:
+            shutil.copy2(CONFIG_FILE, backup_path)
+            os.chmod(backup_path, 0o600)
+        except OSError:
+            pass
+
     zones_out = {
         g: {
             "name": z["name"], "modes": z["modes"],

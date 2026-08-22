@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 import ac_cli
-from mit import DriveState, HVACUnit, MNetHTTPError
+from mit import AirDirection, DriveState, HVACUnit, MNetHTTPError
 
 
 class TestSaveConfig(unittest.TestCase):
@@ -38,6 +38,38 @@ class TestSaveConfig(unittest.TestCase):
             # entry created by os.replace().
             self.assertEqual(mock_fsync.call_count, 2)
 
+    def test_save_config_backs_up_previous_contents_before_overwriting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = os.path.join(directory, "config.json")
+            backup_path = config_path + ".backup"
+            first = {"host": "192.0.2.1", "port": 80, "zones": {}}
+            second = {"host": "192.0.2.2", "port": 81, "zones": {}}
+
+            with mock.patch.object(ac_cli, "CONFIG_FILE", config_path):
+                ac_cli.save_config(first)
+                self.assertFalse(os.path.exists(backup_path))
+
+                ac_cli.save_config(second)
+                self.assertTrue(os.path.exists(backup_path))
+                with open(backup_path) as f:
+                    self.assertEqual(json.load(f)["host"], "192.0.2.1")
+                with open(config_path) as f:
+                    self.assertEqual(json.load(f)["host"], "192.0.2.2")
+                self.assertEqual(stat.S_IMODE(os.stat(backup_path).st_mode), 0o600)
+
+    def test_save_config_backup_failure_does_not_block_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = os.path.join(directory, "config.json")
+            with open(config_path, "w") as f:
+                f.write("original\n")
+
+            with mock.patch.object(ac_cli, "CONFIG_FILE", config_path), \
+                 mock.patch("ac_cli.shutil.copy2", side_effect=OSError("disk full")):
+                saved = ac_cli.save_config({"host": "192.0.2.2", "port": 80, "zones": {}})
+
+            with open(config_path) as f:
+                self.assertEqual(json.load(f), saved)
+
     def test_failed_replace_preserves_existing_config_and_removes_temp_file(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = os.path.join(directory, "config.json")
@@ -56,7 +88,11 @@ class TestSaveConfig(unittest.TestCase):
 
             with open(config_path) as f:
                 self.assertEqual(f.read(), "original\n")
-            self.assertEqual(os.listdir(directory), ["config.json"])
+            # A backup of the pre-existing file is expected; only the
+            # failed-rename's temp file must be absent.
+            self.assertEqual(sorted(os.listdir(directory)), ["config.json", "config.json.backup"])
+            with open(config_path + ".backup") as f:
+                self.assertEqual(f.read(), "original\n")
 
     def test_default_config_directory_is_tightened_but_override_parent_is_not(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -185,15 +221,14 @@ class TestLoadConfig(unittest.TestCase):
 
             with mock.patch.object(ac_cli, "CONFIG_FILE", config_path):
                 config = ac_cli.load_config()
+                self.assertEqual(config["zones"]["1"]["modes"], [])
+                self.assertEqual(config["zones"]["1"]["fan_speeds"], [])
+                self.assertEqual(config["zones"]["1"]["air_directions"], [])
 
-            self.assertEqual(config["zones"]["1"]["modes"], [])
-            self.assertEqual(config["zones"]["1"]["fan_speeds"], [])
-            self.assertEqual(config["zones"]["1"]["air_directions"], [])
-
-            saved = ac_cli.save_config(config)
-            self.assertEqual(saved["zones"]["1"]["modes"], [])
-            self.assertEqual(saved["zones"]["1"]["fan_speeds"], [])
-            self.assertEqual(saved["zones"]["1"]["air_directions"], [])
+                saved = ac_cli.save_config(config)
+                self.assertEqual(saved["zones"]["1"]["modes"], [])
+                self.assertEqual(saved["zones"]["1"]["fan_speeds"], [])
+                self.assertEqual(saved["zones"]["1"]["air_directions"], [])
 
 
 class TestZoneDiscovery(unittest.TestCase):
@@ -415,6 +450,60 @@ class TestDiscoverFeatures(unittest.TestCase):
 
 
 class TestCliCommands(unittest.TestCase):
+    def test_set_air_dispatches_only_a_discovered_direction(self):
+        config = {
+            "host": "192.0.2.1", "port": 80, "icon_temp": "avg",
+            "zones": {"1": {
+                "name": "Room 1", "modes": ["COOL"],
+                "fan_speeds": ["AUTO"], "air_directions": ["HORIZONTAL"],
+            }},
+        }
+        ctrl = mock.Mock()
+        ctrl.set_air_direction.return_value = True
+        with mock.patch("sys.argv", ["ac_cli.py", "set-air", "1", "HORIZONTAL"]), \
+             mock.patch("ac_cli.load_config", return_value=config), \
+             mock.patch("ac_cli.controller", return_value=ctrl), \
+             mock.patch("builtins.print"):
+            ac_cli.main()
+
+        ctrl.set_air_direction.assert_called_once_with(1, AirDirection.HORIZONTAL)
+
+    def test_set_air_rejects_an_undiscovered_direction(self):
+        config = {
+            "host": "192.0.2.1", "port": 80, "icon_temp": "avg",
+            "zones": {"1": {
+                "name": "Room 1", "modes": ["COOL"],
+                "fan_speeds": ["AUTO"], "air_directions": [],
+            }},
+        }
+        ctrl = mock.Mock()
+        with mock.patch("sys.argv", ["ac_cli.py", "set-air", "1", "HORIZONTAL"]), \
+             mock.patch("ac_cli.load_config", return_value=config), \
+             mock.patch("ac_cli.controller", return_value=ctrl), \
+             mock.patch("sys.stderr"):
+            with self.assertRaises(SystemExit) as ctx:
+                ac_cli.main()
+
+        self.assertEqual(ctx.exception.code, 1)
+        ctrl.set_air_direction.assert_not_called()
+
+    def test_status_serialization_includes_air_filter_and_fault_fields(self):
+        unit = HVACUnit(
+            group=1, air_direction=AirDirection.HORIZONTAL,
+            filter_sign="ON", error_sign="OFF",
+        )
+        zone = {
+            "name": "Room 1", "modes": [], "fan_speeds": [],
+            "air_directions": ["HORIZONTAL"],
+        }
+
+        result = ac_cli.unit_to_dict(unit, zone)
+
+        self.assertEqual(result["air_direction"], "HORIZONTAL")
+        self.assertEqual(result["air_directions"], ["HORIZONTAL"])
+        self.assertEqual(result["filter_sign"], "ON")
+        self.assertEqual(result["error_sign"], "OFF")
+
     def test_invalid_set_host_cannot_mutate_config(self):
         config = dict(ac_cli.DEFAULT_CONFIG)
         with mock.patch("sys.argv", ["ac_cli.py", "set-host", "invalid host@name"]), \

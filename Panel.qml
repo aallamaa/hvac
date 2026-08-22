@@ -448,7 +448,6 @@ Panel {
         textFormat: Text.PlainText
         id: zoneName
         text: zoneRow.zone.name
-          + (zoneRow.zone.filterSign === "ON" ? "  [FILTER]" : "")
           + (zoneRow.zone.errorSign !== null && zoneRow.zone.errorSign !== undefined
              && zoneRow.zone.errorSign !== "OFF" ? "  [FAULT]" : "")
         color: zoneRow.zone.errorSign !== null && zoneRow.zone.errorSign !== undefined
@@ -459,9 +458,41 @@ Panel {
         elide: Text.ElideRight
         anchors.left: powerBtn.right
         anchors.leftMargin: Style.space(6)
-        anchors.right: zoneTemp.left
+        anchors.right: filterIndicator.left
         anchors.rightMargin: Style.space(6)
         anchors.verticalCenter: parent.verticalCenter
+      }
+
+      Item {
+        id: filterIndicator
+        visible: zoneRow.zone.filterSign === "ON"
+        width: visible ? filterGlyph.implicitWidth : 0
+        height: filterGlyph.implicitHeight
+        anchors.right: zoneTemp.left
+        anchors.rightMargin: visible ? Style.space(6) : 0
+        anchors.verticalCenter: parent.verticalCenter
+
+        Text {
+          id: filterGlyph
+          textFormat: Text.PlainText
+          text: "󰵃"
+          color: root.bar.urgent
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        MouseArea {
+          id: filterHover
+          anchors.fill: parent
+          hoverEnabled: true
+          acceptedButtons: Qt.NoButton
+        }
+
+        PanelToolTip {
+          visible: filterHover.containsMouse
+          text: "Filter ON"
+          fontFamily: root.bar.fontFamily
+        }
       }
 
       Text {
