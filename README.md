@@ -38,6 +38,17 @@ Then place it on the bar (if `--enable` didn't already):
 omarchy bar move mhvac.ac --section right
 ```
 
+The widget works without a terminal shortcut. To use the shorter `ac ...`
+commands shown below, install an optional symlink to the deployed CLI:
+
+```bash
+mkdir -p ~/.local/bin
+ln -s ~/.config/omarchy/plugins/mhvac.ac/ac_cli.py ~/.local/bin/ac
+```
+
+If that path already exists, inspect or remove it before creating the link;
+the command intentionally does not overwrite an existing file.
+
 ## Usage
 
 Click the snowflake icon in the bar to open the popup. Each zone shows:
@@ -91,10 +102,12 @@ where they come from. A zone can also be given as a plain name string
 (`"1": "Living room"`); it's upgraded on load to the full shape above,
 filled in with not-yet-discovered defaults.
 
-If this file (or its `zones` key) is missing, the first `status` call reads the
-gateway's configured group inventory and names in one request. On firmware
-without that API it falls back to probing the 50 possible group slots. It
-never assumes zones 1–6. An explicit `"zones": {}` is
+If this file (or its `zones` key) is missing, the popup shows a **Discover
+zones** button instead of silently creating configuration. Set the gateway
+address first if it is not the default, then click that button (or run
+`ac zones-init`) to read the configured group inventory and names. On firmware
+without the inventory API discovery falls back to probing the 50 possible
+group slots. It never assumes zones 1–6. An explicit `"zones": {}` is
 authoritative and means “query and control no groups.” Invalid or unreadable
 configuration fails closed instead of restoring built-in control targets.
 The initial gateway default is `192.168.1.2`; use `set-host` or `AC_HOST` /
@@ -107,6 +120,21 @@ ac discover            # read the group inventory (with probe fallback)
 ac zones-init          # same, then add groups and gateway-configured names
 ac rename 3 "Kids room"
 ac set-host 192.168.1.50
+```
+
+`set-host` changes only the gateway address; it deliberately retains existing
+zone names and discovered capabilities so an IP-address change does not erase
+your setup. If the new address points to different hardware, reconcile the
+saved zones before using bulk controls: run `zones-init` to add newly discovered
+groups, then remove stale groups from `config.json` (and run
+`discover-features` to refresh capabilities).
+
+Before replacing an existing configuration, the CLI keeps one recovery copy
+at `~/.config/ac-plugin/config.json.backup`. To restore it, copy it back over
+`config.json` while no AC command is running, then reopen the popup:
+
+```bash
+cp ~/.config/ac-plugin/config.json.backup ~/.config/ac-plugin/config.json
 ```
 
 ### Per-zone capability discovery
@@ -126,6 +154,12 @@ ac discover-features 6      # just zone/group 6
 documentation marks them as not applicable for setting, so the plugin never
 writes them. Capability results also report air-direction, swing, filter-sign,
 and error-sign availability in the CLI output.
+
+## Update
+
+```bash
+omarchy plugin update mhvac.ac --yes
+```
 
 ## Remove
 
@@ -173,8 +207,8 @@ only manages plugin lifecycle (list/enable/disable/validate). To run
 python3 ~/.config/omarchy/plugins/mhvac.ac/ac_cli.py status
 ```
 
-or use the `ac` shortcut installed at `~/.local/bin/ac` (on `PATH`), which
-always calls the deployed copy:
+or use the optional `ac` shortcut described under Install. It lives at
+`~/.local/bin/ac` (normally on `PATH`) and calls the deployed copy:
 
 ```bash
 ac status

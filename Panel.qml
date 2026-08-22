@@ -38,7 +38,13 @@ Panel {
   property string actionError: ""
   property bool unreachable: false
   property bool statusLoaded: false
+  property bool setupRequired: false
   property var pendingQueue: []
+  readonly property bool hvacControlsEnabled: root.statusLoaded
+    && !root.unreachable
+    && !statusProc.running
+    && !actionProc.running
+    && root.pendingQueue.length === 0
 
   readonly property var iconTempModes: ["avg", "min", "max", "off"]
   property string iconTempMode: "avg"
@@ -111,8 +117,9 @@ Panel {
     try {
       var data = JSON.parse(raw)
       if (root.iconTempModes.indexOf(data.icon_temp) !== -1) root.iconTempMode = data.icon_temp
+      root.setupRequired = data.setup_required === true
     } catch (e) {
-      // Keep the current mode on a bad/empty response.
+      // Keep the current settings on a bad/empty response.
     }
   }
 
@@ -153,14 +160,17 @@ Panel {
   }
 
   function enqueue(args) {
-    pendingQueue.push(args)
+    // Replace the array so bindings that depend on its length are notified.
+    pendingQueue = pendingQueue.concat([args])
     drainQueue()
   }
 
   function drainQueue() {
     if (actionProc.running) return
     if (pendingQueue.length === 0) return
-    actionProc.command = ["python3", root.cliPath].concat(pendingQueue.shift())
+    var args = pendingQueue[0]
+    pendingQueue = pendingQueue.slice(1)
+    actionProc.command = ["python3", root.cliPath].concat(args)
     actionProc.running = true
   }
 
@@ -360,6 +370,8 @@ Panel {
 
             Button {
               text: "All On"
+              enabled: root.hvacControlsEnabled
+              opacity: enabled ? 1.0 : 0.45
               fontSize: Style.font.caption
               horizontalPadding: Style.space(6)
               verticalPadding: Style.space(2)
@@ -371,6 +383,8 @@ Panel {
 
             Button {
               text: "All Off"
+              enabled: root.hvacControlsEnabled
+              opacity: enabled ? 1.0 : 0.45
               fontSize: Style.font.caption
               horizontalPadding: Style.space(6)
               verticalPadding: Style.space(2)
@@ -405,9 +419,25 @@ Panel {
             }
           }
 
+          Button {
+            visible: root.setupRequired && root.zones.length === 0
+            enabled: !statusProc.running && !actionProc.running && root.pendingQueue.length === 0
+            opacity: enabled ? 1.0 : 0.45
+            text: "Discover zones"
+            tooltipText: "Discover zones and create the AC configuration"
+            fontSize: Style.font.caption
+            horizontalPadding: Style.space(8)
+            verticalPadding: Style.space(4)
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            bordered: true
+            onClicked: root.enqueue(["zones-init"])
+          }
+
           Text {
             textFormat: Text.PlainText
-            visible: root.zones.length === 0 && root.lastError === "" && root.actionError === ""
+            visible: !root.setupRequired && root.zones.length === 0
+              && root.lastError === "" && root.actionError === ""
             text: root.statusLoaded ? "No zones configured" : "Loading…"
             color: root.bar.foreground
             opacity: 0.6
@@ -431,6 +461,8 @@ Panel {
 
       Button {
         id: powerBtn
+        enabled: root.hvacControlsEnabled
+        opacity: enabled ? 1.0 : 0.45
         text: "⏻"
         fontSize: Style.font.caption
         horizontalPadding: Style.space(5)
@@ -466,6 +498,8 @@ Panel {
       Item {
         id: filterIndicator
         visible: zoneRow.zone.filterSign === "ON"
+        Accessible.name: "Filter ON"
+        Accessible.role: Accessible.StaticText
         width: visible ? filterGlyph.implicitWidth : 0
         height: filterGlyph.implicitHeight
         anchors.right: zoneTemp.left
@@ -519,6 +553,8 @@ Panel {
 
         Button {
           id: modeBtn
+          enabled: root.hvacControlsEnabled
+          opacity: enabled ? 1.0 : 0.45
           visible: zoneRow.zone.modes && zoneRow.zone.modes.length > 0
           text: zoneRow.zone.mode || "—"
           fontSize: Style.font.caption
@@ -531,6 +567,8 @@ Panel {
         }
 
         Button {
+          enabled: root.hvacControlsEnabled
+          opacity: enabled ? 1.0 : 0.45
           visible: zoneRow.zone.fanSpeeds && zoneRow.zone.fanSpeeds.length > 0
           text: zoneRow.zone.fanSpeed || "—"
           fontSize: Style.font.caption
@@ -543,6 +581,8 @@ Panel {
         }
 
         Button {
+          enabled: root.hvacControlsEnabled
+          opacity: enabled ? 1.0 : 0.45
           visible: zoneRow.zone.airDirections && zoneRow.zone.airDirections.length > 0
           text: root.airDirectionLabel(zoneRow.zone.airDirection)
           tooltipText: "Air direction: " + (zoneRow.zone.airDirection || "unknown")
@@ -564,6 +604,8 @@ Panel {
 
         Button {
           text: "−"
+          enabled: root.hvacControlsEnabled
+          opacity: enabled ? 1.0 : 0.45
           fontSize: Style.font.caption
           horizontalPadding: Style.space(6)
           verticalPadding: Style.space(2)
@@ -587,6 +629,8 @@ Panel {
 
         Button {
           text: "+"
+          enabled: root.hvacControlsEnabled
+          opacity: enabled ? 1.0 : 0.45
           fontSize: Style.font.caption
           horizontalPadding: Style.space(6)
           verticalPadding: Style.space(2)

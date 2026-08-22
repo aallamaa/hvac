@@ -224,6 +224,7 @@ class MNetController:
 
         old_handler = signal.getsignal(signal.SIGALRM)
         response = None
+        session = None
         cleanup_error = None
         primary_error = None
         old_signal_mask = None
@@ -235,7 +236,9 @@ class MNetController:
             signal.signal(signal.SIGALRM, _on_alarm)
             signal.setitimer(signal.ITIMER_REAL, self.MAX_REQUEST_SECONDS, 0.0)
 
-            response = requests.post(
+            session = requests.Session()
+            session.trust_env = False
+            response = session.post(
                 self.url,
                 headers=self.headers,
                 data=xml_data,
@@ -277,8 +280,12 @@ class MNetController:
             try:
                 primary_error = sys.exc_info()[0]
                 try:
-                    if response is not None:
-                        response.close()
+                    try:
+                        if response is not None:
+                            response.close()
+                    finally:
+                        if session is not None:
+                            session.close()
                 finally:
                     # Keep SIGALRM active through close(), then atomically
                     # block it before restoring process-global signal state.
@@ -306,13 +313,8 @@ class MNetController:
 
     def _parse_response(self, xml_response: str) -> List[HVACUnit]:
         """Parse XML response into HVACUnit objects"""
-        # M-NET responses have no DTD. Rejecting one prevents internal entity
-        # expansion without adding another runtime dependency.
-        if "<!DOCTYPE" in xml_response.upper():
-            raise Exception("M-NET response contains a forbidden DTD")
-
         try:
-            root = ET.fromstring(xml_response)
+            root = self._parse_xml(xml_response)
             units = []
 
             for mnet in root.findall(".//Mnet"):
@@ -336,9 +338,12 @@ class MNetController:
         if "<!DOCTYPE" in xml_response.upper():
             raise Exception("M-NET response contains a forbidden DTD")
         try:
-            return ET.fromstring(xml_response)
+            root = ET.fromstring(xml_response)
         except ET.ParseError as e:
             raise Exception(f"Failed to parse M-NET response: {e}") from e
+        if root.findtext("./Command", default="").strip() != "getResponse":
+            raise Exception("M-NET gateway returned an unexpected response command")
+        return root
 
     def get_group_inventory(self) -> Dict[int, Dict[str, object]]:
         """Return configured groups, controller names, models and addresses."""
@@ -608,6 +613,7 @@ class MNetController:
     def get_unit_status(self, group: int) -> HVACUnit:
         """Get status of a single HVAC unit"""
         units = self.get_status([group])
-        if not units:
+        unit = next((unit for unit in units if unit.group == group), None)
+        if unit is None:
             raise Exception(f"No response for group {group}")
-        return units[0]
+        return unit

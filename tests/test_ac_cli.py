@@ -64,7 +64,7 @@ class TestSaveConfig(unittest.TestCase):
                 f.write("original\n")
 
             with mock.patch.object(ac_cli, "CONFIG_FILE", config_path), \
-                 mock.patch("ac_cli.shutil.copy2", side_effect=OSError("disk full")):
+                 mock.patch("ac_cli.shutil.copyfileobj", side_effect=OSError("disk full")):
                 saved = ac_cli.save_config({"host": "192.0.2.2", "port": 80, "zones": {}})
 
             with open(config_path) as f:
@@ -81,8 +81,14 @@ class TestSaveConfig(unittest.TestCase):
                 "port": 80,
                 "zones": {},
             }
+            real_replace = os.replace
+            def replace_backup_then_fail_primary(source, destination):
+                if destination.endswith(".backup"):
+                    return real_replace(source, destination)
+                raise OSError("replace failed")
+
             with mock.patch.object(ac_cli, "CONFIG_FILE", config_path), \
-                 mock.patch("ac_cli.os.replace", side_effect=OSError("replace failed")):
+                 mock.patch("ac_cli.os.replace", side_effect=replace_backup_then_fail_primary):
                 with self.assertRaisesRegex(OSError, "replace failed"):
                     ac_cli.save_config(config)
 
@@ -93,6 +99,27 @@ class TestSaveConfig(unittest.TestCase):
             self.assertEqual(sorted(os.listdir(directory)), ["config.json", "config.json.backup"])
             with open(config_path + ".backup") as f:
                 self.assertEqual(f.read(), "original\n")
+
+    def test_backup_replaces_symlink_without_following_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = os.path.join(directory, "config.json")
+            victim_path = os.path.join(directory, "victim")
+            backup_path = config_path + ".backup"
+            with open(config_path, "w") as f:
+                f.write("old config\n")
+            with open(victim_path, "w") as f:
+                f.write("do not overwrite\n")
+            os.symlink(victim_path, backup_path)
+
+            with mock.patch.object(ac_cli, "CONFIG_FILE", config_path):
+                ac_cli.save_config({"host": "192.0.2.1", "port": 80, "zones": {}})
+
+            with open(victim_path) as f:
+                self.assertEqual(f.read(), "do not overwrite\n")
+            self.assertFalse(os.path.islink(backup_path))
+            with open(backup_path) as f:
+                self.assertEqual(f.read(), "old config\n")
+            self.assertEqual(stat.S_IMODE(os.stat(backup_path).st_mode), 0o600)
 
     def test_default_config_directory_is_tightened_but_override_parent_is_not(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -118,6 +145,24 @@ class TestSaveConfig(unittest.TestCase):
 
 
 class TestLoadConfig(unittest.TestCase):
+    def test_runtime_endpoint_overrides_are_not_loaded_or_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = os.path.join(directory, "config.json")
+            with open(config_path, "w") as f:
+                json.dump({"host": "192.0.2.1", "port": 80, "zones": {}}, f)
+
+            with mock.patch.object(ac_cli, "CONFIG_FILE", config_path), \
+                 mock.patch.dict(os.environ, {"AC_HOST": "198.51.100.2", "AC_PORT": "8080"}):
+                config = ac_cli.load_config()
+                self.assertEqual((config["host"], config["port"]), ("192.0.2.1", 80))
+                ctrl = ac_cli.controller(config)
+                self.assertEqual((ctrl.host, ctrl.port), ("198.51.100.2", 8080))
+                ac_cli.save_config(config)
+
+            with open(config_path) as f:
+                saved = json.load(f)
+            self.assertEqual((saved["host"], saved["port"]), ("192.0.2.1", 80))
+
     def test_explicit_zone_subset_does_not_reintroduce_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = os.path.join(directory, "config.json")
@@ -141,6 +186,7 @@ class TestLoadConfig(unittest.TestCase):
 
         self.assertEqual(config["zones"], {})
         self.assertEqual(ac_cli.groups_from_config(config), [])
+        self.assertFalse(config["setup_required"])
 
     def test_missing_config_marks_zones_for_discovery_without_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -150,7 +196,7 @@ class TestLoadConfig(unittest.TestCase):
                 config = ac_cli.load_config()
 
         self.assertEqual(ac_cli.groups_from_config(config), [])
-        self.assertTrue(config["_discover_zones"])
+        self.assertTrue(config["setup_required"])
 
     def test_malformed_config_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -232,37 +278,12 @@ class TestLoadConfig(unittest.TestCase):
 
 
 class TestZoneDiscovery(unittest.TestCase):
-    def test_missing_zone_key_discovers_and_persists_only_found_groups(self):
-        config = dict(ac_cli.DEFAULT_CONFIG)
-        config["zones"] = {}
-        config["_discover_zones"] = True
+    def test_explicit_empty_zones_are_setup_complete(self):
+        ac_cli.require_setup_complete({"zones": {}, "setup_required": False})
 
-        info = {
-            2: {"name": "Kitchen"},
-            9: {"name": None},
-        }
-        with mock.patch("ac_cli.discover_zone_info", return_value=info) as discover, \
-             mock.patch("ac_cli.save_config") as save:
-            ac_cli.ensure_discovered_zones(config)
-
-        discover.assert_called_once_with(config, 50)
-        self.assertEqual(list(config["zones"]), ["2", "9"])
-        self.assertNotIn("_discover_zones", config)
-        save.assert_called_once_with(config)
-
-    def test_explicit_empty_zones_do_not_trigger_discovery(self):
-        config = {"zones": {}}
-        with mock.patch("ac_cli.discover") as discover:
-            ac_cli.ensure_discovered_zones(config)
-        discover.assert_not_called()
-
-    def test_no_discovered_groups_does_not_persist_empty_authoritative_set(self):
-        config = {"zones": {}, "_discover_zones": True}
-        with mock.patch("ac_cli.discover_zone_info", return_value={}), \
-             mock.patch("ac_cli.save_config") as save:
-            with self.assertRaisesRegex(RuntimeError, "No configured"):
-                ac_cli.ensure_discovered_zones(config)
-        save.assert_not_called()
+    def test_missing_zones_require_explicit_setup(self):
+        with self.assertRaisesRegex(RuntimeError, "zones-init"):
+            ac_cli.require_setup_complete({"zones": {}, "setup_required": True})
 
     def test_inventory_discovery_excludes_non_ic_units(self):
         ctrl = mock.Mock()
@@ -356,10 +377,11 @@ class TestStatusFallback(unittest.TestCase):
         ctrl = mock.Mock()
         unit1 = HVACUnit(group=1, drive=DriveState.ON)
         unit3 = HVACUnit(group=3, drive=DriveState.OFF)
+        unit2 = HVACUnit(group=2, drive=DriveState.ON)
         ctrl.get_status.side_effect = [
-            self.gateway_500(), [unit1], self.gateway_500(), [unit3]
+            self.gateway_500(), [unit1], [unit2], [unit3]
         ]
-        self.assertEqual(ac_cli.get_status_resilient(ctrl, [1, 2, 3]), [unit1, unit3])
+        self.assertEqual(ac_cli.get_status_resilient(ctrl, [1, 2, 3]), [unit1, unit2, unit3])
         self.assertEqual(ctrl.get_status.call_args_list, [
             mock.call([1, 2, 3]), mock.call([1]), mock.call([2]), mock.call([3])
         ])
@@ -369,9 +391,56 @@ class TestStatusFallback(unittest.TestCase):
         ctrl.get_status.side_effect = [
             self.gateway_500(), self.gateway_500(), self.gateway_500()
         ]
-        with self.assertRaises(MNetHTTPError) as ctx:
+        with self.assertRaisesRegex(RuntimeError, "configured group 1"):
             ac_cli.get_status_resilient(ctrl, [1, 2])
-        self.assertEqual(ctx.exception.status_code, 500)
+
+    def test_partial_batch_retries_only_missing_and_preserves_valid_units(self):
+        ctrl = mock.Mock()
+        unit1 = HVACUnit(group=1, drive=DriveState.ON)
+        unit2 = HVACUnit(group=2, drive=DriveState.OFF)
+        ctrl.get_status.side_effect = [[unit1], [unit2]]
+
+        self.assertEqual(ac_cli.get_status_resilient(ctrl, [1, 2]), [unit1, unit2])
+        self.assertEqual(ctrl.get_status.call_args_list, [mock.call([1, 2]), mock.call([2])])
+
+    def test_status_rejects_duplicate_unrequested_and_unresolved_groups(self):
+        cases = [
+            ([HVACUnit(group=1), HVACUnit(group=1)], "duplicate"),
+            ([HVACUnit(group=3)], "unrequested"),
+        ]
+        for response, message in cases:
+            with self.subTest(message=message):
+                ctrl = mock.Mock()
+                ctrl.get_status.return_value = response
+                with self.assertRaisesRegex(RuntimeError, message):
+                    ac_cli.get_status_resilient(ctrl, [1, 2])
+
+        ctrl = mock.Mock()
+        ctrl.get_status.side_effect = [[], []]
+        with self.assertRaisesRegex(RuntimeError, "invalid status"):
+            ac_cli.get_status_resilient(ctrl, [1])
+
+    def test_batch_indicator_only_status_fails_closed(self):
+        ctrl = mock.Mock()
+        ctrl.get_status.return_value = [HVACUnit(
+            group=1, filter_sign="ON", error_sign="OFF"
+        )]
+
+        with self.assertRaisesRegex(RuntimeError, "incomplete status"):
+            ac_cli.get_status_resilient(ctrl, [1])
+        ctrl.get_status.assert_called_once_with([1])
+
+    def test_individual_indicator_only_status_fails_closed(self):
+        ctrl = mock.Mock()
+        ctrl.get_status.side_effect = [[], [HVACUnit(
+            group=1, filter_sign="ON", error_sign="OFF"
+        )]]
+
+        with self.assertRaisesRegex(RuntimeError, "invalid status"):
+            ac_cli.get_status_resilient(ctrl, [1])
+        self.assertEqual(ctrl.get_status.call_args_list, [
+            mock.call([1]), mock.call([1]),
+        ])
 
     def test_direct_control_requires_configured_group(self):
         with self.assertRaisesRegex(ValueError, "not configured"):
@@ -450,6 +519,88 @@ class TestDiscoverFeatures(unittest.TestCase):
 
 
 class TestCliCommands(unittest.TestCase):
+    def test_first_run_status_is_offline_and_empty(self):
+        config = {"host": "192.0.2.1", "port": 80, "icon_temp": "avg",
+                  "zones": {}, "setup_required": True}
+        with mock.patch("sys.argv", ["ac_cli.py", "status"]), \
+             mock.patch("ac_cli.load_config", return_value=config), \
+             mock.patch("ac_cli.controller") as controller, \
+             mock.patch("ac_cli.discover_zone_info") as discover, \
+             mock.patch("ac_cli.save_config") as save, \
+             mock.patch("builtins.print") as output:
+            ac_cli.main()
+
+        output.assert_called_once_with("[]")
+        controller.assert_not_called()
+        discover.assert_not_called()
+        save.assert_not_called()
+
+    def test_config_exposes_setup_required(self):
+        config = {"host": "192.0.2.1", "port": 80, "icon_temp": "avg",
+                  "zones": {}, "setup_required": True}
+        with mock.patch("sys.argv", ["ac_cli.py", "config"]), \
+             mock.patch("ac_cli.load_config", return_value=config), \
+             mock.patch("builtins.print") as output:
+            ac_cli.main()
+        self.assertTrue(json.loads(output.call_args.args[0])["setup_required"])
+
+    def test_first_run_control_commands_require_zones_init_without_network(self):
+        config = {"host": "192.0.2.1", "port": 80, "icon_temp": "avg",
+                  "zones": {}, "setup_required": True}
+        commands = (["all-on"], ["all-off"], ["on", "1"],
+                    ["set-mode", "1", "COOL"], ["discover-features"])
+        for command in commands:
+            with self.subTest(command=command[0]), \
+                 mock.patch("sys.argv", ["ac_cli.py"] + command), \
+                 mock.patch("ac_cli.load_config", return_value=config), \
+                 mock.patch("ac_cli.controller") as controller, \
+                 mock.patch("ac_cli.discover_zone_info") as discover, \
+                 mock.patch("ac_cli.save_config") as save, \
+                 mock.patch("sys.stderr"):
+                with self.assertRaises(SystemExit) as ctx:
+                    ac_cli.main()
+                self.assertEqual(ctx.exception.code, 1)
+                controller.assert_not_called()
+                discover.assert_not_called()
+                save.assert_not_called()
+
+    def test_zones_init_is_explicit_discovery_and_persist_setup(self):
+        config = {"host": "192.0.2.1", "port": 80, "icon_temp": "avg",
+                  "zones": {}, "setup_required": True}
+        found = {2: {"name": "Kitchen"}, 9: {"name": None}}
+        with mock.patch("sys.argv", ["ac_cli.py", "zones-init"]), \
+             mock.patch("ac_cli.load_config", return_value=config), \
+             mock.patch("ac_cli.discover_zone_info", return_value=found) as discover, \
+             mock.patch("ac_cli.save_config", side_effect=lambda value: value) as save, \
+             mock.patch("builtins.print"):
+            ac_cli.main()
+
+        discover.assert_called_once_with(config, 50)
+        save.assert_called_once_with(config)
+        self.assertFalse(config["setup_required"])
+        self.assertEqual(list(config["zones"]), ["2", "9"])
+
+    def test_set_mode_and_fan_enforce_discovered_capabilities(self):
+        config = {
+            "host": "192.0.2.1", "port": 80, "icon_temp": "avg",
+            "zones": {"1": {
+                "name": "Room 1", "modes": ["COOL"],
+                "fan_speeds": ["AUTO"], "air_directions": [],
+            }},
+        }
+        for argv, method in ((["set-mode", "1", "HEAT"], "set_mode"),
+                             (["set-fan", "1", "HIGH"], "set_fan_speed")):
+            with self.subTest(command=argv[0]):
+                ctrl = mock.Mock()
+                with mock.patch("sys.argv", ["ac_cli.py"] + argv), \
+                     mock.patch("ac_cli.load_config", return_value=config), \
+                     mock.patch("ac_cli.controller", return_value=ctrl), \
+                     mock.patch("sys.stderr"):
+                    with self.assertRaises(SystemExit) as ctx:
+                        ac_cli.main()
+                self.assertEqual(ctx.exception.code, 1)
+                getattr(ctrl, method).assert_not_called()
+
     def test_set_air_dispatches_only_a_discovered_direction(self):
         config = {
             "host": "192.0.2.1", "port": 80, "icon_temp": "avg",

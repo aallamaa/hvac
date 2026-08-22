@@ -107,9 +107,9 @@ def load_config():
     config = dict(DEFAULT_CONFIG)
     config.update({k: v for k, v in data.items() if k != "zones"})
     # An explicit zone set is authoritative, including an empty one. If the
-    # key is absent (old config or first run), status performs read-only group
-    # discovery and persists the result before any bulk control is possible.
-    config["_discover_zones"] = "zones" not in data
+    # key is absent (old config or first run), commands report that explicit
+    # `zones-init` setup is required; status remains offline and never writes.
+    config["setup_required"] = "zones" not in data
     zones_raw = data.get("zones", {})
     if not isinstance(zones_raw, dict):
         raise ValueError("AC config zones must be a JSON object")
@@ -124,16 +124,9 @@ def load_config():
         zones[str(group)] = normalize_zone(value, group)
     config["zones"] = zones
 
-    # Env vars win over the file, for one-off overrides without editing it.
-    if os.environ.get("AC_HOST"):
-        config["host"] = os.environ["AC_HOST"]
-    if os.environ.get("AC_PORT"):
-        try:
-            config["port"] = int(os.environ["AC_PORT"])
-        except ValueError as e:
-            raise ValueError("AC_PORT must be an integer") from e
-
-    # Validate host/port now, including commands that do not make a request.
+    # Validate persisted host/port now, including commands that do not make a
+    # request. Runtime environment overrides are applied only by controller(),
+    # so an unrelated config save can never persist a one-off endpoint.
     MNetController(config["host"], config["port"])
     if config.get("icon_temp") not in ICON_TEMP_MODES:
         raise ValueError("icon_temp must be one of {}".format(", ".join(ICON_TEMP_MODES)))
@@ -149,18 +142,36 @@ def save_config(config):
         # arbitrary parent directory selected through AC_CONFIG_FILE.
         os.chmod(config_dir, 0o700)
 
-    # Keep one generation of history: copy whatever is currently on disk to
-    # <config>.backup before it gets overwritten, so a bad write - this
-    # script writing unexpected data, a bug, a corrupted file - can be
-    # recovered from with a plain `cp`. Best-effort: a backup failure must
-    # never block the actual save.
+    # Keep one generation of history. Use a private same-directory temporary
+    # file and atomic replacement so an attacker-controlled backup symlink is
+    # never followed and an interrupted copy cannot leave a partial backup.
+    # Best-effort: a backup failure must never block the actual save.
     if os.path.exists(CONFIG_FILE):
         backup_path = CONFIG_FILE + ".backup"
+        backup_fd = None
+        backup_temp = None
         try:
-            shutil.copy2(CONFIG_FILE, backup_path)
-            os.chmod(backup_path, 0o600)
+            backup_fd, backup_temp = tempfile.mkstemp(
+                prefix=".config.backup.", suffix=".tmp", dir=config_dir
+            )
+            os.fchmod(backup_fd, 0o600)
+            with open(CONFIG_FILE, "rb") as source, os.fdopen(backup_fd, "wb") as target:
+                backup_fd = None
+                shutil.copyfileobj(source, target)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(backup_temp, backup_path)
+            backup_temp = None
         except OSError:
             pass
+        finally:
+            if backup_fd is not None:
+                os.close(backup_fd)
+            if backup_temp is not None:
+                try:
+                    os.unlink(backup_temp)
+                except FileNotFoundError:
+                    pass
 
     zones_out = {
         g: {
@@ -175,7 +186,7 @@ def save_config(config):
         "port": config["port"],
         "icon_temp": config.get("icon_temp", "avg"),
     }
-    if not config.get("_discover_zones", False):
+    if not config.get("setup_required", False):
         to_write["zones"] = dict(sorted(zones_out.items(), key=lambda kv: int(kv[0])))
     fd, temp_path = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=config_dir)
     try:
@@ -206,7 +217,14 @@ def save_config(config):
 
 
 def controller(config):
-    return MNetController(config["host"], config["port"])
+    host = os.environ.get("AC_HOST") or config["host"]
+    port = config["port"]
+    if os.environ.get("AC_PORT"):
+        try:
+            port = int(os.environ["AC_PORT"])
+        except ValueError as e:
+            raise ValueError("AC_PORT must be an integer") from e
+    return MNetController(host, port)
 
 
 def groups_from_config(config):
@@ -262,23 +280,44 @@ def get_status_resilient(ctrl, groups):
     """Use an efficient batch, falling back per group on gateway HTTP 500."""
     if not groups:
         return []
+    requested = set(groups)
     try:
-        return ctrl.get_status(groups)
+        batch_units = ctrl.get_status(groups)
     except Exception as batch_error:
         if not is_unused_group_http_error(batch_error):
             raise
-        units = []
-        successful_requests = 0
-        for group in groups:
-            try:
-                units.extend(ctrl.get_status([group]))
-                successful_requests += 1
-            except Exception as group_error:
-                if not is_unused_group_http_error(group_error):
-                    raise
-        if successful_requests == 0:
-            raise batch_error
-        return units
+        batch_units = []
+
+    batch_groups = [unit.group for unit in batch_units]
+    if len(batch_groups) != len(set(batch_groups)):
+        raise RuntimeError("M-NET gateway returned duplicate groups in status response")
+    unexpected = set(batch_groups) - requested
+    if unexpected:
+        raise RuntimeError("M-NET gateway returned unrequested group(s): {}".format(
+            ", ".join(map(str, sorted(unexpected)))
+        ))
+    invalid = [unit.group for unit in batch_units if unit.drive is None]
+    if invalid:
+        raise RuntimeError("M-NET gateway returned incomplete status for configured group(s): {}".format(
+            ", ".join(map(str, sorted(invalid)))
+        ))
+
+    by_group = {unit.group: unit for unit in batch_units}
+    for group in groups:
+        if group in by_group:
+            continue
+        try:
+            individual = ctrl.get_status([group])
+        except Exception as group_error:
+            raise RuntimeError("No status available for configured group {}".format(group)) from group_error
+        if (len(individual) != 1 or individual[0].group != group
+                or individual[0].drive is None):
+            raise RuntimeError("M-NET gateway returned invalid status for configured group {}".format(group))
+        by_group[group] = individual[0]
+
+    if not by_group:
+        raise RuntimeError("M-NET gateway returned no status for configured groups")
+    return [by_group[group] for group in groups]
 
 
 def discover_zone_info(config, max_group):
@@ -333,18 +372,9 @@ def discover(config, max_group):
     return sorted(discover_zone_info(config, max_group))
 
 
-def ensure_discovered_zones(config):
-    """Discover and persist zones only when an old/missing config has no key."""
-    if not config.pop("_discover_zones", False):
-        return config
-    found = discover_zone_info(config, DISCOVER_MAX)
-    if not found:
-        raise RuntimeError("No configured M-NET groups were discovered")
-    for group, info in found.items():
-        name = info.get("name") or "Zone {}".format(group)
-        config["zones"][str(group)] = normalize_zone(name, group)
-    save_config(config)
-    return config
+def require_setup_complete(config):
+    if config.get("setup_required", False):
+        raise RuntimeError("AC setup is required; run `ac zones-init` first")
 
 
 def discover_features(config, groups):
@@ -469,13 +499,17 @@ def main():
     try:
         args = parser.parse_args()
         config = load_config()
-        if args.cmd in ("status", "all-on", "all-off", "discover-features"):
-            ensure_discovered_zones(config)
+        if args.cmd in ("all-on", "all-off", "on", "off", "set-temp",
+                        "set-fan", "set-mode", "set-air", "discover-features"):
+            require_setup_complete(config)
         if args.cmd in ("on", "off", "set-temp", "set-fan", "set-mode", "set-air"):
             require_configured_group(config, args.group)
         if args.cmd == "discover-features" and args.group is not None:
             require_configured_group(config, args.group)
         if args.cmd == "status":
+            if config.get("setup_required", False):
+                print(json.dumps([]))
+                return
             groups = groups_from_config(config)
             units = get_status_resilient(controller(config), groups)
             by_group = {u.group: u for u in units}
@@ -484,7 +518,7 @@ def main():
                 for g in groups if g in by_group
             ]))
         elif args.cmd == "config":
-            print(json.dumps({k: v for k, v in config.items() if not k.startswith("_")}))
+            print(json.dumps(config))
         elif args.cmd == "alarms":
             print(json.dumps(controller(config).get_alarm_status()))
         elif args.cmd == "all-on":
@@ -510,10 +544,14 @@ def main():
                 controller(config).set_temperature(args.group, args.temp), "temperature"
             )))
         elif args.cmd == "set-fan":
+            if args.speed not in config["zones"][str(args.group)]["fan_speeds"]:
+                raise ValueError("Fan speed is not supported for this group")
             print(json.dumps(require_confirmed(
                 controller(config).set_fan_speed(args.group, FanSpeed(args.speed)), "fan speed"
             )))
         elif args.cmd == "set-mode":
+            if args.mode not in config["zones"][str(args.group)]["modes"]:
+                raise ValueError("Mode is not supported for this group")
             print(json.dumps(require_confirmed(
                 controller(config).set_mode(args.group, Mode(args.mode)), "mode"
             )))
@@ -539,7 +577,7 @@ def main():
                 if key not in config["zones"]:
                     name = zone_info[g].get("name") or "Zone {}".format(g)
                     config["zones"][key] = normalize_zone(name, g)
-            config.pop("_discover_zones", None)
+            config["setup_required"] = False
             saved = save_config(config)
             print(json.dumps({"found": found, "zones": saved["zones"]}))
         elif args.cmd == "discover-features":
@@ -552,7 +590,7 @@ def main():
             zone_cfg = config["zones"][key]
             zone_cfg["name"] = args.name
             config["zones"][key] = zone_cfg
-            config.pop("_discover_zones", None)
+            config["setup_required"] = False
             saved = save_config(config)
             print(json.dumps(saved))
         elif args.cmd == "set-icon-temp":

@@ -67,9 +67,29 @@ class DummyStreamResponse:
         return self._content
 
 
+class DummyDirectSession:
+    """Keep existing post mocks while exposing Session lifecycle behavior."""
+    instances = []
+
+    def __init__(self):
+        self.trust_env = True
+        self.close_called = False
+        self.instances.append(self)
+
+    def post(self, *args, **kwargs):
+        return requests.post(*args, **kwargs)
+
+    def close(self):
+        self.close_called = True
+
+
 class TestMNetControllerSendRequest(unittest.TestCase):
     def setUp(self):
         self.ctrl = MNetController("127.0.0.1", 80)
+        DummyDirectSession.instances = []
+        self.session_patch = mock.patch("requests.Session", DummyDirectSession)
+        self.session_patch.start()
+        self.addCleanup(self.session_patch.stop)
         # Ensure clean signal state before each test
         signal.setitimer(signal.ITIMER_REAL, 0, 0)
 
@@ -88,6 +108,8 @@ class TestMNetControllerSendRequest(unittest.TestCase):
             self.assertEqual(mock_resp.close_call_count, 1)
             self.assertEqual(resp.content, sample_xml)
             self.assertEqual(resp.text, sample_xml.decode("utf-8"))
+            self.assertFalse(DummyDirectSession.instances[0].trust_env)
+            self.assertTrue(DummyDirectSession.instances[0].close_called)
 
             mock_post.assert_called_once_with(
                 self.ctrl.url,
@@ -321,7 +343,7 @@ class TestHVACUnitParsing(unittest.TestCase):
         self.assertEqual(unit.error_sign, "OFF")
 
     def test_one_malformed_group_does_not_discard_valid_group(self):
-        xml = """<Packet><DatabaseManager>
+        xml = """<Packet><Command>getResponse</Command><DatabaseManager>
             <Mnet Group="bad" Drive="ON"/>
             <Mnet Group="2" Drive="OFF" Mode="AUTOHEAT" SetTemp="22.0"/>
         </DatabaseManager></Packet>"""
@@ -331,8 +353,16 @@ class TestHVACUnitParsing(unittest.TestCase):
         self.assertEqual(units[0].set_temp, 22)
 
     def test_all_wildcard_group_is_treated_as_unconfigured(self):
-        xml = '<Packet><DatabaseManager><Mnet Group="7" Drive="*" Mode="*"/></DatabaseManager></Packet>'
+        xml = '<Packet><Command>getResponse</Command><DatabaseManager><Mnet Group="7" Drive="*" Mode="*"/></DatabaseManager></Packet>'
         self.assertEqual(MNetController()._parse_response(xml), [])
+
+    def test_status_parser_rejects_wrong_or_missing_command(self):
+        ctrl = MNetController()
+        for command in ("", "getRequest", "setResponse"):
+            command_xml = "<Command>{}</Command>".format(command) if command else ""
+            xml = '<Packet>{}<DatabaseManager><Mnet Group="1" Drive="ON"/></DatabaseManager></Packet>'.format(command_xml)
+            with self.subTest(command=command), self.assertRaisesRegex(Exception, "unexpected response command"):
+                ctrl._parse_response(xml)
 
     def test_non_finite_inlet_temperatures_are_treated_as_missing(self):
         for value in ("nan", "inf", "-inf", "NaN", "Infinity"):
@@ -438,6 +468,16 @@ class TestControlConfirmation(unittest.TestCase):
             self.assertEqual(self.ctrl.get_status([]), [])
         send.assert_not_called()
 
+    def test_get_unit_status_requires_the_requested_group(self):
+        wrong = HVACUnit(group=2, drive=DriveState.ON)
+        with mock.patch.object(self.ctrl, "get_status", return_value=[wrong]):
+            with self.assertRaisesRegex(Exception, "No response for group 1"):
+                self.ctrl.get_unit_status(1)
+
+        expected = HVACUnit(group=1, drive=DriveState.OFF)
+        with mock.patch.object(self.ctrl, "get_status", return_value=[wrong, expected]):
+            self.assertIs(self.ctrl.get_unit_status(1), expected)
+
     def test_set_air_direction_requires_matching_confirmation(self):
         response = mock.Mock(text="""<Packet><Command>setResponse</Command>
             <DatabaseManager><Mnet Group="6" AirDirection="MID1"/></DatabaseManager>
@@ -468,6 +508,15 @@ class TestDiscoveryApis(unittest.TestCase):
         request = send.call_args.args[0]
         self.assertIn("<MnetGroupList/>", request)
         self.assertIn("<MnetList/>", request)
+
+    def test_query_api_rejects_wrong_response_command(self):
+        response = mock.Mock(text="""<Packet><Command>setResponse</Command>
+            <DatabaseManager><ControlGroup><MnetGroupList>
+            <MnetGroupRecord Group="1" Model="IC"/>
+            </MnetGroupList></ControlGroup></DatabaseManager></Packet>""")
+        with mock.patch.object(self.ctrl, "_send_request", return_value=response):
+            with self.assertRaisesRegex(Exception, "unexpected response command"):
+                self.ctrl.get_group_inventory()
 
     def test_get_group_models_queries_and_parses_valid_records(self):
         response = mock.Mock(text="""<Packet><Command>getResponse</Command>
@@ -543,6 +592,9 @@ class TestDiscoveryApis(unittest.TestCase):
 class TestSignalAndAlarmPreservation(unittest.TestCase):
     def setUp(self):
         self.ctrl = MNetController("127.0.0.1", 80)
+        self.session_patch = mock.patch("requests.Session", DummyDirectSession)
+        self.session_patch.start()
+        self.addCleanup(self.session_patch.stop)
         signal.setitimer(signal.ITIMER_REAL, 0, 0)
 
     def tearDown(self):
@@ -693,7 +745,7 @@ class LocalHttpServerIntegrationTest(unittest.TestCase):
                 resp = (
                     b'<?xml version="1.0" encoding="UTF-8"?>\n'
                     b'<Packet>\n'
-                    b'  <Command>getRequest</Command>\n'
+                    b'  <Command>getResponse</Command>\n'
                     b'  <DatabaseManager>\n'
                     b'    <Mnet Group="1" Drive="ON" Mode="COOL" SetTemp="22" FanSpeed="HIGH" InletTemp="24.5" />\n'
                     b'  </DatabaseManager>\n'
