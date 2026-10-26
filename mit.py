@@ -1,12 +1,118 @@
-import signal
-import sys
 import math
+import os
 import re
+import signal
+import site
+import sys
 import xml.etree.ElementTree as ET
-import requests
+
+
+def _ensure_requests():
+    """Return the requests module, installing it into the user site if missing.
+
+    The QML panel launches this CLI as plain `python3`, so it runs on
+    whatever interpreter PATH currently selects (mise, system, distro).
+    An upgrade that swaps interpreters loses user-installed packages,
+    which used to kill the widget with ModuleNotFoundError. Reinstall the
+    one third-party dependency instead. The lock keeps concurrent plugin
+    processes (status poll + user actions) from running pip twice at once.
+    """
+    try:
+        import requests
+        return requests
+    except ImportError:
+        pass
+
+    import fcntl
+    import subprocess
+
+    try:
+        cache_dir = os.path.join(
+            os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+            "mhvac.ac",
+        )
+        os.makedirs(cache_dir, exist_ok=True)
+        # One lock per interpreter version: different pythons install to
+        # different site directories and never contend with each other.
+        lock_file = open(
+            os.path.join(
+                cache_dir,
+                f"pip-{sys.version_info.major}.{sys.version_info.minor}.lock",
+            ),
+            "a+",
+        )
+    except OSError:
+        lock_file = None  # read-only HOME: attempt an unlocked install
+
+    try:
+        if lock_file is not None:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        # Whoever held the lock may have finished installing already, but
+        # only if this process can see the user site it was installed to.
+        _register_user_site()
+        try:
+            import requests
+            return requests
+        except ImportError:
+            pass
+
+        try:
+            import pip  # noqa: F401
+        except ImportError:
+            # Minimal interpreters can ship without pip.
+            subprocess.run(
+                [sys.executable, "-m", "ensurepip", "--user"],
+                capture_output=True, text=True, timeout=180,
+            )
+
+        cmd = [
+            sys.executable, "-m", "pip", "install",
+            "--disable-pip-version-check", "--no-input", "requests",
+        ]
+        if site.ENABLE_USER_SITE:
+            cmd.append("--user")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if result.returncode != 0 and "externally-managed" in (result.stderr or ""):
+            # PEP 668 (e.g. Arch's system python) refuses installs without
+            # this flag; a --user install still lands in the user site,
+            # never in a package-manager-owned directory.
+            result = subprocess.run(
+                cmd + ["--break-system-packages"],
+                capture_output=True, text=True, timeout=180,
+            )
+        if result.returncode != 0:
+            raise ImportError(
+                "requests is missing and could not be auto-installed; run "
+                f"'{sys.executable} -m pip install --user requests' manually. "
+                f"pip output: {(result.stderr or result.stdout or '').strip()[-400:]}"
+            )
+        print("mhvac.ac: installed missing 'requests' package", file=sys.stderr)
+        _register_user_site()
+        import requests
+        return requests
+    finally:
+        if lock_file is not None:
+            lock_file.close()  # releases the flock
+
+
+def _register_user_site():
+    """Add this interpreter's user-site directory to sys.path if missing.
+
+    site.py only adds the user site at startup when its directory already
+    exists, so a process started before an install (or before another
+    process's install completed) cannot import from it until it is added
+    here. Safe to call repeatedly.
+    """
+    user_site = site.getusersitepackages()
+    if os.path.isdir(user_site) and user_site not in sys.path:
+        sys.path.append(user_site)
+
+
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Union
 from enum import Enum
+from typing import Optional, List, Dict, Union
+
+requests = _ensure_requests()
 
 
 class _RequestTimedOut(Exception):

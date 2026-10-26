@@ -16,8 +16,11 @@ temperature reading rather than showing a stale value.
   HTTP/XML gateway (`servlet/MIMEReceiveServlet`) — this is a specific
   integration, not a generic "any AC" plugin. If your gateway doesn't
   speak this protocol, this plugin won't talk to it.
-- `python3` on `PATH`, with the `requests` package installed
-  (`pip install requests`, or your distro's package).
+- `python3` on `PATH` with pip available (`python3 -m pip --version` works).
+  The only third-party dependency, `requests`, is installed automatically
+  into the user site on first run if it is missing — if an interpreter
+  upgrade swaps `python3` and drops installed packages, the plugin
+  self-heals on the next poll instead of silently failing.
 - Network access from the machine running Omarchy to the gateway.
 
 No elevated privileges are needed — everything runs as your normal user.

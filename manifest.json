@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "mhvac.ac",
   "name": "AC Control",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "kader",
   "license": "GPL-3.0-or-later",
   "description": "Mitsubishi M-NET HVAC control with per-zone temperature, mode, fan, air direction, filter and fault status, and alarms",
